@@ -1,0 +1,4 @@
+.env
+secrets.h
+node_modules/
+*.db
