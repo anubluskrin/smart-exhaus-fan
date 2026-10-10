@@ -28,7 +28,7 @@ const historyStmt = db.prepare(`
   ORDER BY t
 `);
 
-function startApi() {
+function startApi(mqttClient) {
   const app = express();
   app.use(express.json());
   app.use(express.static(path.join(__dirname, '..', 'dashboard')));
@@ -62,6 +62,42 @@ function startApi() {
     const since = new Date(Date.now() - seconds * 1000).toISOString();
     const rows = historyStmt.all(device, since, bucket);
     res.json({ device, range, count: rows.length, points: rows });
+  });
+
+    const DEVICE_RE = /^[A-Za-z0-9_-]{1,32}$/;
+
+  function publishCommand(device, sub, payload, res) {
+    if (!DEVICE_RE.test(device)) {
+      return res.status(400).json({ error: 'nama perangkat tidak valid' });
+    }
+    if (!mqttClient.connected) {
+      return res.status(503).json({ error: 'Backend belum terhubung ke broker' });
+    }
+    const topic = `bathfan/${device}/cmd/${sub}`;
+    mqttClient.publish(topic, JSON.stringify(payload), { qos: 1 }, (err) => {
+      if (err) return res.status(500).json({ error: err.message });
+      res.json({ ok: true, topic, payload });
+    });
+  }
+
+  app.post('/api/mode', (req, res) => {
+    const body = req.body || {};
+    const device = body.device || 'fan01';
+    const mode = body.mode;
+    if (mode !== 'auto' && mode !== 'manual') {
+      return res.status(400).json({ error: 'mode harus auto atau manual' });
+    }
+    publishCommand(device, 'mode', { mode }, res);
+  });
+
+  app.post('/api/speed', (req, res) => {
+    const body = req.body || {};
+    const device = body.device || 'fan01';
+    const pwm = Number(body.pwm);
+    if (!Number.isInteger(pwm) || pwm < 0 || pwm > 100) {
+      return res.status(400).json({ error: 'pwm harus bilangan bulat 0 sampai 100' });
+    }
+    publishCommand(device, 'speed', { pwm }, res);
   });
 
   app.listen(PORT, () => {

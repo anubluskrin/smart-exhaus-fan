@@ -67,4 +67,4 @@ client.on('error', (err) => {
 });
 
 const { startApi } = require('./api');
-startApi();
+startApi(client);
