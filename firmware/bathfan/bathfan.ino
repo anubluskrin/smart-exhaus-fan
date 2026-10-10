@@ -31,10 +31,17 @@ unsigned long lastPublish = 0;
 int currentSpeed = 0;
 float lastHum = 0, lastTemp = 0;
 
+// Mode kontrol
+bool manualMode = false;
+int manualSpeed = 0;
+
 DHT dht(DHT_PIN, DHT_TYPE);
 WiFiClientSecure net;
 PubSubClient mqtt(net);
 String topicTelemetry;
+String topicCmdAll;
+String topicCmdMode;
+String topicCmdSpeed;
 
 void setFanSpeed(int percent) {
   percent = constrain(percent, 0, 100);
@@ -54,7 +61,7 @@ const char* stateName(State s) {
 
 void connectWifi() {
   Serial.print("Menyambung WiFi");
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  WiFi.begin(WIFI_SSID, WIFI_PASS, 6);
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
@@ -68,6 +75,8 @@ void connectMqtt() {
     String clientId = String("esp32-") + DEVICE_ID;
     if (mqtt.connect(clientId.c_str(), MQTT_USER, MQTT_PASS)) {
       Serial.println("terhubung");
+      mqtt.subscribe(topicCmdAll.c_str());
+      Serial.printf("Berlangganan: %s\n", topicCmdAll.c_str());
     } else {
       Serial.printf("gagal, rc=%d, coba lagi 5 detik\n", mqtt.state());
       delay(5000);
@@ -77,28 +86,34 @@ void connectMqtt() {
 
 void updateControl(float h) {
   int speed = 0;
-  switch (state) {
-    case IDLE:
-      speed = 0;
-      if (h > HUM_ON) state = RUNNING;
-      break;
-    case RUNNING:
-      speed = humidityToSpeed(h);
-      if (h < HUM_OFF) {
-        state = POSTRUN;
-        postrunStart = millis();
-      }
-      break;
-    case POSTRUN:
-      speed = MIN_SPEED;
-      if (h > HUM_ON) {
-        state = RUNNING;
-      } else if (millis() - postrunStart >= POSTRUN_MS) {
-        state = IDLE;
+
+  if (manualMode) {
+    speed = manualSpeed;
+  } else {
+    switch (state) {
+      case IDLE:
         speed = 0;
-      }
-      break;
+        if (h > HUM_ON) state = RUNNING;
+        break;
+      case RUNNING:
+        speed = humidityToSpeed(h);
+        if (h < HUM_OFF) {
+          state = POSTRUN;
+          postrunStart = millis();
+        }
+        break;
+      case POSTRUN:
+        speed = MIN_SPEED;
+        if (h > HUM_ON) {
+          state = RUNNING;
+        } else if (millis() - postrunStart >= POSTRUN_MS) {
+          state = IDLE;
+          speed = 0;
+        }
+        break;
+    }
   }
+
   currentSpeed = speed;
   setFanSpeed(speed);
 }
@@ -108,7 +123,8 @@ void publishTelemetry() {
   doc["hum"] = round(lastHum * 10) / 10.0;
   doc["temp"] = round(lastTemp * 10) / 10.0;
   doc["pwm"] = currentSpeed;
-  doc["state"] = stateName(state);
+  doc["mode"] = manualMode ? "manual" : "auto";
+  doc["state"] = manualMode ? "MANUAL" : stateName(state);
 
   char buf[200];
   serializeJson(doc, buf);
@@ -116,17 +132,61 @@ void publishTelemetry() {
   Serial.printf("Terkirim: %s\n", buf);
 }
 
+void onMessage(char* topic, byte* payload, unsigned int length) {
+  JsonDocument doc;
+  DeserializationError err = deserializeJson(doc, payload, length);
+  if (err) {
+    Serial.println("Perintah ditolak: bukan JSON yang valid");
+    return;
+  }
+
+  String t = String(topic);
+
+  if (t == topicCmdMode) {
+    const char* m = doc["mode"] | "";
+    if (strcmp(m, "manual") == 0) {
+      manualMode = true;
+    } else if (strcmp(m, "auto") == 0) {
+      manualMode = false;
+      state = IDLE;
+    } else {
+      Serial.println("Perintah ditolak: mode harus auto atau manual");
+      return;
+    }
+    Serial.printf("Mode diubah: %s\n", m);
+
+  } else if (t == topicCmdSpeed) {
+    if (!doc["pwm"].is<int>()) {
+      Serial.println("Perintah ditolak: pwm harus berupa angka");
+      return;
+    }
+    manualSpeed = constrain(doc["pwm"].as<int>(), 0, 100);
+    Serial.printf("Kecepatan manual: %d %%\n", manualSpeed);
+
+  } else {
+    return;
+  }
+
+  updateControl(lastHum);
+  publishTelemetry();
+}
+
 void setup() {
   Serial.begin(115200);
   dht.begin();
   ledcAttach(FAN_PIN, PWM_FREQ, PWM_RES);
 
-  topicTelemetry = String("bathfan/") + DEVICE_ID + "/telemetry";
+  String base = String("bathfan/") + DEVICE_ID;
+  topicTelemetry = base + "/telemetry";
+  topicCmdAll = base + "/cmd/#";
+  topicCmdMode = base + "/cmd/mode";
+  topicCmdSpeed = base + "/cmd/speed";
 
   connectWifi();
   net.setInsecure();   // sementara untuk pengembangan, diperketat di Tahap 8
   mqtt.setServer(MQTT_HOST, MQTT_PORT);
   mqtt.setBufferSize(512);
+  mqtt.setCallback(onMessage);
 }
 
 void loop() {
