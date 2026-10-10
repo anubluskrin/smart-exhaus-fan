@@ -65,3 +65,6 @@ client.on('message', (topic, payload) => {
 client.on('error', (err) => {
   console.error('Error MQTT:', err.message);
 });
+
+const { startApi } = require('./api');
+startApi();
