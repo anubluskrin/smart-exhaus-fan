@@ -1,28 +1,42 @@
-const Database = require('better-sqlite3');
-const path = require('path');
+require('dotenv').config();
+const { Pool } = require('pg');
 
-const db = new Database(path.join(__dirname, 'bathfan.db'));
+// Pool membaca PGHOST, PGPORT, PGDATABASE, PGUSER, PGPASSWORD dari .env
+const pool = new Pool();
 
-db.exec(`
-  CREATE TABLE IF NOT EXISTS telemetry (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    device_id TEXT NOT NULL,
-    humidity REAL,
-    temperature REAL,
-    fan_pwm INTEGER,
-    mode TEXT,
-    state TEXT,
-    created_at TEXT NOT NULL
-  );
-  CREATE INDEX IF NOT EXISTS idx_telemetry_device_time
-    ON telemetry (device_id, created_at);
-`);
+async function init() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS telemetry (
+      id BIGSERIAL PRIMARY KEY,
+      device_id TEXT NOT NULL,
+      humidity DOUBLE PRECISION,
+      temperature DOUBLE PRECISION,
+      fan_pwm INTEGER,
+      mode TEXT,
+      state TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_telemetry_device_time
+      ON telemetry (device_id, created_at)
+  `);
+}
 
-module.exports = db;
+module.exports = { pool, init };
 
 if (require.main === module) {
-  const tables = db
-    .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
-    .all();
-  console.log('Database siap. Tabel:', tables.map((t) => t.name).join(', '));
+  (async () => {
+    try {
+      await init();
+      const r = await pool.query(
+        "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'"
+      );
+      console.log('Database siap. Tabel:', r.rows.map((x) => x.table_name).join(', '));
+    } catch (e) {
+      console.error('Gagal:', e.message);
+    } finally {
+      await pool.end();
+    }
+  })();
 }

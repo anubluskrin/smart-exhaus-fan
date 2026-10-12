@@ -1,6 +1,6 @@
 const express = require('express');
 const path = require('path');
-const db = require('./db');
+const { pool } = require('./db');
 
 const PORT = 3000;
 const ONLINE_THRESHOLD_SEC = 20;
@@ -12,59 +12,80 @@ const RANGES = {
   '7d': { seconds: 604800, bucket: 600 },
 };
 
-const latestStmt = db.prepare(
-  'SELECT * FROM telemetry WHERE device_id = ? ORDER BY id DESC LIMIT 1'
-);
+const DEVICE_RE = /^[A-Za-z0-9_-]{1,32}$/;
 
-const historyStmt = db.prepare(`
-  SELECT
-    MIN(created_at) AS t,
-    ROUND(AVG(humidity), 1) AS humidity,
-    ROUND(AVG(temperature), 1) AS temperature,
-    ROUND(AVG(fan_pwm)) AS fan_pwm
+const LATEST_SQL = `
+  SELECT humidity, temperature, fan_pwm, mode, state, created_at
   FROM telemetry
-  WHERE device_id = ? AND created_at >= ?
-  GROUP BY CAST(strftime('%s', created_at) AS INTEGER) / ?
-  ORDER BY t
-`);
+  WHERE device_id = $1
+  ORDER BY id DESC
+  LIMIT 1
+`;
+
+const HISTORY_SQL = `
+  SELECT
+    to_timestamp((floor(extract(epoch FROM created_at) / $3::int) * $3::int)::double precision) AS t,
+    ROUND(AVG(humidity)::numeric, 1)::float8 AS humidity,
+    ROUND(AVG(temperature)::numeric, 1)::float8 AS temperature,
+    ROUND(AVG(fan_pwm)::numeric)::int AS fan_pwm
+  FROM telemetry
+  WHERE device_id = $1 AND created_at >= $2
+  GROUP BY 1
+  ORDER BY 1
+`;
 
 function startApi(mqttClient) {
   const app = express();
   app.use(express.json());
   app.use(express.static(path.join(__dirname, '..', 'dashboard')));
 
-  app.get('/api/status', (req, res) => {
+  app.get('/api/status', async (req, res) => {
     const device = req.query.device || 'fan01';
-    const row = latestStmt.get(device);
-    if (!row) {
-      return res.json({ device, online: false, latest: null });
+    if (!DEVICE_RE.test(device)) {
+      return res.status(400).json({ error: 'nama perangkat tidak valid' });
     }
-    const ageSec = (Date.now() - new Date(row.created_at).getTime()) / 1000;
-    res.json({
-      device,
-      online: ageSec < ONLINE_THRESHOLD_SEC,
-      last_seen_sec_ago: Math.round(ageSec),
-      latest: {
-        humidity: row.humidity,
-        temperature: row.temperature,
-        fan_pwm: row.fan_pwm,
-        mode: row.mode,
-        state: row.state,
-        time: row.created_at,
-      },
-    });
+    try {
+      const { rows } = await pool.query(LATEST_SQL, [device]);
+      if (rows.length === 0) {
+        return res.json({ device, online: false, latest: null });
+      }
+      const row = rows[0];
+      const ageSec = (Date.now() - row.created_at.getTime()) / 1000;
+      res.json({
+        device,
+        online: ageSec < ONLINE_THRESHOLD_SEC,
+        last_seen_sec_ago: Math.round(ageSec),
+        latest: {
+          humidity: row.humidity,
+          temperature: row.temperature,
+          fan_pwm: row.fan_pwm,
+          mode: row.mode,
+          state: row.state,
+          time: row.created_at,
+        },
+      });
+    } catch (e) {
+      console.error('Gagal membaca status:', e.message);
+      res.status(500).json({ error: 'gagal membaca database' });
+    }
   });
 
-  app.get('/api/history', (req, res) => {
+  app.get('/api/history', async (req, res) => {
     const device = req.query.device || 'fan01';
+    if (!DEVICE_RE.test(device)) {
+      return res.status(400).json({ error: 'nama perangkat tidak valid' });
+    }
     const range = RANGES[req.query.range] ? req.query.range : '1h';
     const { seconds, bucket } = RANGES[range];
-    const since = new Date(Date.now() - seconds * 1000).toISOString();
-    const rows = historyStmt.all(device, since, bucket);
-    res.json({ device, range, count: rows.length, points: rows });
+    const since = new Date(Date.now() - seconds * 1000);
+    try {
+      const { rows } = await pool.query(HISTORY_SQL, [device, since, bucket]);
+      res.json({ device, range, count: rows.length, points: rows });
+    } catch (e) {
+      console.error('Gagal membaca riwayat:', e.message);
+      res.status(500).json({ error: 'gagal membaca database' });
+    }
   });
-
-    const DEVICE_RE = /^[A-Za-z0-9_-]{1,32}$/;
 
   function publishCommand(device, sub, payload, res) {
     if (!DEVICE_RE.test(device)) {
