@@ -4,6 +4,8 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 
+import 'air_flow.dart';
+
 // Dengan "adb reverse", HP menjangkau backend lewat localhost.
 // (Untuk emulator Android, ganti menjadi http://10.0.2.2:3000)
 const String kBaseUrl = 'http://localhost:3000';
@@ -193,6 +195,7 @@ class _DashboardPageState extends State<DashboardPage> {
     return Container(
       width: double.infinity,
       height: 300,
+      clipBehavior: Clip.antiAlias,
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(28),
         border: Border.all(color: kLine),
@@ -204,6 +207,9 @@ class _DashboardPageState extends State<DashboardPage> {
       ),
       child: Stack(
         children: [
+                    Positioned.fill(
+            child: AirFlow(color: color, speed: (s?.fanPwm ?? 0) / 100),
+          ),
           const Positioned(
             top: 20,
             left: 20,
