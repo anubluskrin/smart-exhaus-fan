@@ -5,6 +5,8 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 
 import 'air_flow.dart';
+import 'constants.dart';
+import 'stats_page.dart';
 
 // Dengan "adb reverse", HP menjangkau backend lewat localhost.
 // (Untuk emulator Android, ganti menjadi http://10.0.2.2:3000)
@@ -78,7 +80,7 @@ class BathfanApp extends StatelessWidget {
         scaffoldBackgroundColor: kBg,
         colorScheme: const ColorScheme.dark(primary: kAccent),
       ),
-      home: const DashboardPage(),
+      home: const HomeShell(),
     );
   }
 }
@@ -469,6 +471,75 @@ class _DashboardPageState extends State<DashboardPage> {
             style: const TextStyle(fontSize: 13, color: kMuted),
           ),
         ],
+      ),
+    );
+  }
+}
+
+
+// navbar
+
+class HomeShell extends StatefulWidget {
+  const HomeShell({super.key});
+
+  @override
+  State<HomeShell> createState() => _HomeShellState();
+}
+
+class _HomeShellState extends State<HomeShell> {
+  int _index = 0;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: IndexedStack(
+        index: _index,
+        children: const [
+          DashboardPage(),
+          StatsPage(),
+          _ComingSoon('Jadwal Standby'),
+          _ComingSoon('Pengaturan'),
+        ],
+      ),
+      bottomNavigationBar: NavigationBar(
+        selectedIndex: _index,
+        onDestinationSelected: (i) => setState(() => _index = i),
+        backgroundColor: const Color(0xFF0D2347),
+        indicatorColor: kLine,
+        destinations: const [
+          NavigationDestination(
+            icon: Icon(Icons.water_drop_outlined),
+            selectedIcon: Icon(Icons.water_drop),
+            label: 'Dashboard',
+          ),
+          NavigationDestination(icon: Icon(Icons.show_chart), label: 'Statistik'),
+          NavigationDestination(icon: Icon(Icons.schedule), label: 'Jadwal'),
+          NavigationDestination(
+            icon: Icon(Icons.settings_outlined),
+            selectedIcon: Icon(Icons.settings),
+            label: 'Pengaturan',
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ComingSoon extends StatelessWidget {
+  final String title;
+  const _ComingSoon(this.title);
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: SafeArea(
+        child: Center(
+          child: Text(
+            '$title\n(segera hadir)',
+            textAlign: TextAlign.center,
+            style: const TextStyle(color: kMuted, fontSize: 16),
+          ),
+        ),
       ),
     );
   }
