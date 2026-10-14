@@ -94,6 +94,8 @@ class _DashboardPageState extends State<DashboardPage> {
   FanStatus? _status;
   String? _error;
   Timer? _timer;
+  String? _pendingMode;
+  double _manualSpeed = 50;
 
   @override
   void initState() {
@@ -106,6 +108,50 @@ class _DashboardPageState extends State<DashboardPage> {
   void dispose() {
     _timer?.cancel();
     super.dispose();
+  }
+
+    Future<bool> _post(String path, Map<String, dynamic> body) async {
+    try {
+      final res = await http
+          .post(
+            Uri.parse('$kBaseUrl$path'),
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode(body),
+          )
+          .timeout(const Duration(seconds: 5));
+      if (res.statusCode != 200) throw Exception('HTTP ${res.statusCode}');
+      return true;
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Perintah gagal dikirim')),
+        );
+      }
+      return false;
+    }
+  }
+
+  Future<void> _setMode(String mode) async {
+    setState(() => _pendingMode = mode);
+    if (mode == 'manual') {
+      // Mulai dari kecepatan saat ini, supaya fan tidak mendadak berhenti.
+      final current = (_status?.fanPwm ?? 0).toDouble();
+      setState(() => _manualSpeed = current);
+      await _post('/api/speed', {'pwm': current.round()});
+    }
+    final ok = await _post('/api/mode', {'mode': mode});
+    if (!ok && mounted) {
+      setState(() => _pendingMode = null);
+      return;
+    }
+    // Setelah beberapa detik, tampilan kembali mengikuti data dari perangkat.
+    Future.delayed(const Duration(seconds: 8), () {
+      if (mounted) setState(() => _pendingMode = null);
+    });
+  }
+
+  Future<void> _sendSpeed(double v) async {
+    await _post('/api/speed', {'pwm': v.round()});
   }
 
   Future<void> _refresh() async {
@@ -131,13 +177,13 @@ class _DashboardPageState extends State<DashboardPage> {
     final s = _status;
     final h = s?.humidity;
     final color = h == null ? kAccent : humidityColor(h);
+    final mode = _pendingMode ?? s?.mode ?? 'auto';
 
     return Scaffold(
       body: SafeArea(
         child: Padding(
           padding: const EdgeInsets.fromLTRB(20, 16, 20, 20),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+          child: ListView(
             children: [
               const Text(
                 'Kamar Mandi',
@@ -155,6 +201,13 @@ class _DashboardPageState extends State<DashboardPage> {
                   Expanded(child: _infoCard(s)),
                 ],
               ),
+              const SizedBox(height: 16),
+              _modeSelector(mode),
+              if (mode == 'manual') ...[
+                const SizedBox(height: 16),
+                _speedCard(),
+              ],
+
               if (_error != null)
                 Padding(
                   padding: const EdgeInsets.only(top: 16),
@@ -166,6 +219,78 @@ class _DashboardPageState extends State<DashboardPage> {
             ],
           ),
         ),
+      ),
+    );
+  }
+
+    Widget _modeSelector(String mode) {
+    Widget item(String value, String label) {
+      final active = mode == value;
+      return Expanded(
+        child: GestureDetector(
+          onTap: () => _setMode(value),
+          child: Container(
+            padding: const EdgeInsets.symmetric(vertical: 14),
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(10),
+              gradient: active
+                  ? const LinearGradient(
+                      colors: [Color(0xFF6FA8FF), Color(0xFFA9CDFF)],
+                    )
+                  : null,
+            ),
+            child: Text(
+              label,
+              style: TextStyle(
+                fontWeight: FontWeight.w700,
+                color: active ? const Color(0xFF08213F) : kMuted,
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
+    return Container(
+      padding: const EdgeInsets.all(4),
+      decoration: BoxDecoration(
+        color: kCard,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: kLine),
+      ),
+      child: Row(children: [item('auto', 'Auto'), item('manual', 'Manual')]),
+    );
+  }
+
+  Widget _speedCard() {
+    return _card(
+      Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              const Text('Kecepatan manual', style: TextStyle(fontSize: 15)),
+              Text(
+                '${_manualSpeed.round()} %',
+                style: const TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.w700,
+                  color: kAccent,
+                ),
+              ),
+            ],
+          ),
+          Slider(
+            value: _manualSpeed,
+            min: 0,
+            max: 100,
+            divisions: 20,
+            onChanged: (v) => setState(() => _manualSpeed = v),
+            onChangeEnd: _sendSpeed,
+          ),
+        ],
       ),
     );
   }
