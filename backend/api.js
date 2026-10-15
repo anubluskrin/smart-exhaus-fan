@@ -131,6 +131,155 @@ function startApi(mqttClient) {
     publishCommand(device, 'power', { on: body.on }, res);
   });
 
+    // ===== Jadwal Standby =====
+  const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+  const MAX_SCHEDULES = 20;
+
+  function parseSchedule(body, partial) {
+    const out = {};
+    if (!partial || body.name !== undefined) {
+      const n = typeof body.name === 'string' ? body.name.trim() : '';
+      if (n.length < 1 || n.length > 40) {
+        return { error: 'name harus 1 sampai 40 karakter' };
+      }
+      out.name = n;
+    }
+    for (const k of ['start_time', 'end_time']) {
+      if (!partial || body[k] !== undefined) {
+        if (typeof body[k] !== 'string' || !TIME_RE.test(body[k])) {
+          return { error: `${k} harus berformat HH:MM` };
+        }
+        out[k] = body[k];
+      }
+    }
+    if (!partial || body.days !== undefined) {
+      const d = body.days;
+      const valid =
+        Array.isArray(d) &&
+        d.length > 0 &&
+        d.every((x) => Number.isInteger(x) && x >= 1 && x <= 7);
+      if (!valid) return { error: 'days harus daftar angka 1 sampai 7' };
+      out.days = [...new Set(d)].sort((a, b) => a - b);
+    }
+    if (!partial || body.enabled !== undefined) {
+      if (typeof body.enabled !== 'boolean') {
+        return { error: 'enabled harus true atau false' };
+      }
+      out.enabled = body.enabled;
+    }
+    return { value: out };
+  }
+
+  const fmtSchedule = (r) => ({
+    id: Number(r.id),
+    device_id: r.device_id,
+    name: r.name,
+    start_time: r.start_time.slice(0, 5),
+    end_time: r.end_time.slice(0, 5),
+    days: r.days,
+    enabled: r.enabled,
+  });
+
+  const SCHEDULE_COLS =
+    'id, device_id, name, start_time::text AS start_time, end_time::text AS end_time, days, enabled';
+
+  app.get('/api/schedules', async (req, res) => {
+    const device = req.query.device || 'fan01';
+    if (!DEVICE_RE.test(device)) {
+      return res.status(400).json({ error: 'nama perangkat tidak valid' });
+    }
+    try {
+      const { rows } = await pool.query(
+        `SELECT ${SCHEDULE_COLS} FROM schedules WHERE device_id = $1 ORDER BY start_time, id`,
+        [device]
+      );
+      res.json({ device, schedules: rows.map(fmtSchedule) });
+    } catch (e) {
+      console.error('Gagal membaca jadwal:', e.message);
+      res.status(500).json({ error: 'gagal membaca database' });
+    }
+  });
+
+  app.post('/api/schedules', async (req, res) => {
+    const body = req.body || {};
+    const device = body.device || 'fan01';
+    if (!DEVICE_RE.test(device)) {
+      return res.status(400).json({ error: 'nama perangkat tidak valid' });
+    }
+    const parsed = parseSchedule({ enabled: true, ...body }, false);
+    if (parsed.error) return res.status(400).json({ error: parsed.error });
+    const v = parsed.value;
+    if (v.start_time === v.end_time) {
+      return res.status(400).json({ error: 'jam mulai dan selesai tidak boleh sama' });
+    }
+    try {
+      const count = await pool.query(
+        'SELECT COUNT(*)::int AS n FROM schedules WHERE device_id = $1',
+        [device]
+      );
+      if (count.rows[0].n >= MAX_SCHEDULES) {
+        return res.status(400).json({ error: `maksimal ${MAX_SCHEDULES} jadwal` });
+      }
+      const { rows } = await pool.query(
+        `INSERT INTO schedules (device_id, name, start_time, end_time, days, enabled)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         RETURNING ${SCHEDULE_COLS}`,
+        [device, v.name, v.start_time, v.end_time, v.days, v.enabled]
+      );
+      res.status(201).json(fmtSchedule(rows[0]));
+    } catch (e) {
+      console.error('Gagal menambah jadwal:', e.message);
+      res.status(500).json({ error: 'gagal menyimpan jadwal' });
+    }
+  });
+
+  app.put('/api/schedules/:id', async (req, res) => {
+    if (!/^\d+$/.test(req.params.id)) {
+      return res.status(400).json({ error: 'id tidak valid' });
+    }
+    const parsed = parseSchedule(req.body || {}, true);
+    if (parsed.error) return res.status(400).json({ error: parsed.error });
+    const keys = Object.keys(parsed.value);
+    if (keys.length === 0) {
+      return res.status(400).json({ error: 'tidak ada yang diubah' });
+    }
+    const sets = keys.map((k, i) => `${k} = $${i + 1}`);
+    const vals = keys.map((k) => parsed.value[k]);
+    try {
+      const { rows } = await pool.query(
+        `UPDATE schedules SET ${sets.join(', ')} WHERE id = $${keys.length + 1}
+         RETURNING ${SCHEDULE_COLS}`,
+        [...vals, req.params.id]
+      );
+      if (rows.length === 0) {
+        return res.status(404).json({ error: 'jadwal tidak ditemukan' });
+      }
+      res.json(fmtSchedule(rows[0]));
+    } catch (e) {
+      if (e.code === '23514') {
+        return res.status(400).json({ error: 'jam mulai dan selesai tidak boleh sama' });
+      }
+      console.error('Gagal mengubah jadwal:', e.message);
+      res.status(500).json({ error: 'gagal menyimpan jadwal' });
+    }
+  });
+
+  app.delete('/api/schedules/:id', async (req, res) => {
+    if (!/^\d+$/.test(req.params.id)) {
+      return res.status(400).json({ error: 'id tidak valid' });
+    }
+    try {
+      const r = await pool.query('DELETE FROM schedules WHERE id = $1', [req.params.id]);
+      if (r.rowCount === 0) {
+        return res.status(404).json({ error: 'jadwal tidak ditemukan' });
+      }
+      res.json({ ok: true });
+    } catch (e) {
+      console.error('Gagal menghapus jadwal:', e.message);
+      res.status(500).json({ error: 'gagal menghapus jadwal' });
+    }
+  });
+
   app.listen(PORT, () => {
     console.log(`API berjalan di http://localhost:${PORT}`);
   });

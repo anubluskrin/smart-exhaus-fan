@@ -25,6 +25,21 @@ async function init() {
     await pool.query(
     'ALTER TABLE telemetry ADD COLUMN IF NOT EXISTS power BOOLEAN'
   );
+
+    await pool.query(`
+    CREATE TABLE IF NOT EXISTS schedules (
+      id BIGSERIAL PRIMARY KEY,
+      device_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      start_time TIME NOT NULL,
+      end_time TIME NOT NULL,
+      days INTEGER[] NOT NULL,
+      enabled BOOLEAN NOT NULL DEFAULT true,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      CHECK (start_time <> end_time),
+      CHECK (cardinality(days) > 0)
+    )
+  `);
 }
 
 module.exports = { pool, init };

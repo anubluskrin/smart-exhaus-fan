@@ -2,6 +2,7 @@ require('dotenv').config();
 const mqtt = require('mqtt');
 const { pool, init } = require('./db');
 const { startApi } = require('./api');
+const { startScheduler } = require('./scheduler');
 
 const INSERT_SQL = `
   INSERT INTO telemetry
@@ -70,6 +71,7 @@ async function main() {
   });
 
   startApi(client);
+  startScheduler(client);
 }
 
 main().catch((e) => {
