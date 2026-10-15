@@ -34,6 +34,7 @@ float lastHum = 0, lastTemp = 0;
 // Mode kontrol
 bool manualMode = false;
 int manualSpeed = 0;
+bool powerOn = true;
 
 DHT dht(DHT_PIN, DHT_TYPE);
 WiFiClientSecure net;
@@ -42,6 +43,7 @@ String topicTelemetry;
 String topicCmdAll;
 String topicCmdMode;
 String topicCmdSpeed;
+String topicCmdPower;
 
 void setFanSpeed(int percent) {
   percent = constrain(percent, 0, 100);
@@ -87,6 +89,12 @@ void connectMqtt() {
 void updateControl(float h) {
   int speed = 0;
 
+    if (!powerOn) {
+    currentSpeed = 0;
+    setFanSpeed(0);
+    return;
+  }
+
   if (manualMode) {
     speed = manualSpeed;
   } else {
@@ -124,7 +132,8 @@ void publishTelemetry() {
   doc["temp"] = round(lastTemp * 10) / 10.0;
   doc["pwm"] = currentSpeed;
   doc["mode"] = manualMode ? "manual" : "auto";
-  doc["state"] = manualMode ? "MANUAL" : stateName(state);
+  doc["power"] = powerOn;
+  doc["state"] = !powerOn ? "OFF" : (manualMode ? "MANUAL" : stateName(state));
 
   char buf[200];
   serializeJson(doc, buf);
@@ -163,6 +172,15 @@ void onMessage(char* topic, byte* payload, unsigned int length) {
     manualSpeed = constrain(doc["pwm"].as<int>(), 0, 100);
     Serial.printf("Kecepatan manual: %d %%\n", manualSpeed);
 
+    } else if (t == topicCmdPower) {
+    if (!doc["on"].is<bool>()) {
+      Serial.println("Perintah ditolak: on harus true atau false");
+      return;
+    }
+    powerOn = doc["on"].as<bool>();
+    if (!powerOn) state = IDLE;
+    Serial.printf("Daya: %s\n", powerOn ? "ON" : "OFF");
+
   } else {
     return;
   }
@@ -181,6 +199,7 @@ void setup() {
   topicCmdAll = base + "/cmd/#";
   topicCmdMode = base + "/cmd/mode";
   topicCmdSpeed = base + "/cmd/speed";
+  topicCmdPower = base + "/cmd/power";
 
   connectWifi();
   net.setInsecure();   // sementara untuk pengembangan, diperketat di Tahap 8

@@ -21,6 +21,10 @@ async function init() {
     CREATE INDEX IF NOT EXISTS idx_telemetry_device_time
       ON telemetry (device_id, created_at)
   `);
+
+    await pool.query(
+    'ALTER TABLE telemetry ADD COLUMN IF NOT EXISTS power BOOLEAN'
+  );
 }
 
 module.exports = { pool, init };

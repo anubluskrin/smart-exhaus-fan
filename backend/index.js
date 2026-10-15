@@ -5,8 +5,8 @@ const { startApi } = require('./api');
 
 const INSERT_SQL = `
   INSERT INTO telemetry
-    (device_id, humidity, temperature, fan_pwm, mode, state)
-  VALUES ($1, $2, $3, $4, $5, $6)
+    (device_id, humidity, temperature, fan_pwm, mode, state, power)
+  VALUES ($1, $2, $3, $4, $5, $6, $7)
 `;
 
 async function main() {
@@ -55,6 +55,7 @@ async function main() {
         Number.isFinite(data.pwm) ? data.pwm : 0,
         typeof data.mode === 'string' ? data.mode : 'auto',
         typeof data.state === 'string' ? data.state : null,
+        typeof data.power === 'boolean' ? data.power : true,
       ]);
       console.log(
         `Tersimpan [${deviceId}] hum=${data.hum} temp=${data.temp} pwm=${data.pwm} state=${data.state}`

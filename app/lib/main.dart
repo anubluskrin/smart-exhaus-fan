@@ -40,6 +40,7 @@ class FanStatus {
   final int? fanPwm;
   final String? mode;
   final String? state;
+  final bool power;
 
   FanStatus({
     required this.online,
@@ -49,6 +50,7 @@ class FanStatus {
     this.fanPwm,
     this.mode,
     this.state,
+    this.power = true,
   });
 
   factory FanStatus.fromJson(Map<String, dynamic> j) {
@@ -61,6 +63,7 @@ class FanStatus {
       fanPwm: (latest?['fan_pwm'] as num?)?.toInt(),
       mode: latest?['mode'] as String?,
       state: latest?['state'] as String?,
+      power: (latest?['power'] as bool?) ?? true,
     );
   }
 }
@@ -98,6 +101,7 @@ class _DashboardPageState extends State<DashboardPage> {
   Timer? _timer;
   String? _pendingMode;
   double _manualSpeed = 50;
+  bool? _pendingPower;
 
   @override
   void initState() {
@@ -152,6 +156,19 @@ class _DashboardPageState extends State<DashboardPage> {
     });
   }
 
+    Future<void> _setPower(bool on) async {
+    setState(() => _pendingPower = on);
+    final ok = await _post('/api/power', {'on': on});
+    if (!ok && mounted) {
+      setState(() => _pendingPower = null);
+      return;
+    }
+    // Setelah beberapa detik, tampilan kembali mengikuti data dari perangkat.
+    Future.delayed(const Duration(seconds: 8), () {
+      if (mounted) setState(() => _pendingPower = null);
+    });
+  }
+
   Future<void> _sendSpeed(double v) async {
     await _post('/api/speed', {'pwm': v.round()});
   }
@@ -180,6 +197,7 @@ class _DashboardPageState extends State<DashboardPage> {
     final h = s?.humidity;
     final color = h == null ? kAccent : humidityColor(h);
     final mode = _pendingMode ?? s?.mode ?? 'auto';
+    final power = _pendingPower ?? s?.power ?? true;
 
     return Scaffold(
       body: SafeArea(
@@ -187,14 +205,29 @@ class _DashboardPageState extends State<DashboardPage> {
           padding: const EdgeInsets.fromLTRB(20, 16, 20, 20),
           child: ListView(
             children: [
-              const Text(
-                'Kamar Mandi',
-                style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700),
+                            Row(
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text(
+                          'Kamar Mandi',
+                          style: TextStyle(
+                            fontSize: 22,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        _subtitle(s),
+                      ],
+                    ),
+                  ),
+                  _powerButton(power),
+                ],
               ),
-              const SizedBox(height: 4),
-              _subtitle(s),
               const SizedBox(height: 16),
-              _hero(s, color),
+              _hero(s, power ? color : const Color(0xFF4B5F7F)),
               const SizedBox(height: 16),
               Row(
                 children: [
@@ -293,6 +326,57 @@ class _DashboardPageState extends State<DashboardPage> {
             onChangeEnd: _sendSpeed,
           ),
         ],
+      ),
+    );
+  }
+
+    Widget _powerButton(bool on) {
+    const dark = Color(0xFF08213F);
+    return Semantics(
+      button: true,
+      label: on ? 'Matikan fan' : 'Nyalakan fan',
+      child: GestureDetector(
+        onTap: () => _setPower(!on),
+        child: Container(
+          height: 44,
+          padding: const EdgeInsets.fromLTRB(16, 6, 6, 6),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(999),
+            color: on ? null : kCard,
+            gradient: on
+                ? const LinearGradient(
+                    colors: [Color(0xFF6FA8FF), Color(0xFFA9CDFF)],
+                  )
+                : null,
+            border: Border.all(color: kLine),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                on ? 'On' : 'Off',
+                style: TextStyle(
+                  fontWeight: FontWeight.w700,
+                  color: on ? dark : kMuted,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Container(
+                width: 32,
+                height: 32,
+                decoration: BoxDecoration(
+                  color: on ? Colors.white : kLine,
+                  shape: BoxShape.circle,
+                ),
+                child: Icon(
+                  Icons.power_settings_new,
+                  size: 18,
+                  color: on ? dark : kMuted,
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }

@@ -15,7 +15,7 @@ const RANGES = {
 const DEVICE_RE = /^[A-Za-z0-9_-]{1,32}$/;
 
 const LATEST_SQL = `
-  SELECT humidity, temperature, fan_pwm, mode, state, created_at
+  SELECT humidity, temperature, fan_pwm, mode, state, power, created_at
   FROM telemetry
   WHERE device_id = $1
   ORDER BY id DESC
@@ -61,6 +61,7 @@ function startApi(mqttClient) {
           fan_pwm: row.fan_pwm,
           mode: row.mode,
           state: row.state,
+          power: row.power ?? true,
           time: row.created_at,
         },
       });
@@ -119,6 +120,15 @@ function startApi(mqttClient) {
       return res.status(400).json({ error: 'pwm harus bilangan bulat 0 sampai 100' });
     }
     publishCommand(device, 'speed', { pwm }, res);
+  });
+
+  app.post('/api/power', (req, res) => {
+    const body = req.body || {};
+    const device = body.device || 'fan01';
+    if (typeof body.on !== 'boolean') {
+      return res.status(400).json({ error: 'on harus true atau false' });
+    }
+    publishCommand(device, 'power', { on: body.on }, res);
   });
 
   app.listen(PORT, () => {
