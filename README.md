@@ -1,4 +1,12 @@
 # Smart Humidity-Based Bathroom Exhaust Fan
+## 👥 Kontributor
+
+| Nama | NIM |
+| :--- | :--- |
+| Hasan Rabbani | 123240005 |
+| Ahmadsyah Anshori | 123240020 |
+| Meg | 123240--- |
+| Nico | 123240--- |
 
 Proyek IoT empat layer: exhaust fan kamar mandi yang menyala otomatis berdasarkan kelembapan udara, bisa dipantau dan dikendalikan dari aplikasi Android, serta menyimpan riwayat data untuk ditampilkan sebagai grafik.
 
