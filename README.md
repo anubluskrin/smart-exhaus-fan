@@ -10,7 +10,8 @@
 
 Proyek IoT empat layer: exhaust fan kamar mandi yang menyala otomatis berdasarkan kelembapan udara, bisa dipantau dan dikendalikan dari aplikasi Android, serta menyimpan riwayat data untuk ditampilkan sebagai grafik.
 
-> **Status saat ini:** Tahap 0 sampai 4 selesai. **Tahap 5 (Jadwal Standby) sedang dikerjakan**: database, API, penjadwal backend, dan firmware sudah jadi; layar Jadwal di aplikasi baru berisi daftar, sakelar aktif, dan hapus. Form tambah/ubah jadwal adalah langkah berikutnya. Lihat [Tahapan pengerjaan](#tahapan-pengerjaan).
+> **Status saat ini:** Tahap 0 sampai 5 selesai (termasuk Jadwal Standby). **Tahap 6 (Pengaturan) berikutnya.** Lihat [Tahapan pengerjaan](#tahapan-pengerjaan).
+(#tahapan-pengerjaan).
 
 ---
 
@@ -288,8 +289,8 @@ Legenda: ✅ selesai, 🔄 sedang dikerjakan, ⏳ belum.
 | 3 | Layer 3: backend Node.js, penyimpanan telemetri ke PostgreSQL, API status, riwayat, dan perintah | ✅ |
 | 4 | Layer 4: aplikasi Flutter. Dashboard (data, animasi aliran udara, mode, kecepatan, On/Off), navigasi bawah, layar Statistik | ✅ |
 | 5a | Jadwal Standby: tabel `schedules`, API jadwal, penjadwal backend, firmware (Standby dan pengaman 3 menit) | ✅ |
-| 5b | Jadwal Standby: layar Jadwal di aplikasi, bagian daftar, sakelar aktif, dan hapus | 🔄 |
-| 5c | Jadwal Standby: form tambah dan ubah jadwal di aplikasi | ⏳ |
+| 5b | Jadwal Standby: layar Jadwal di aplikasi, bagian daftar, sakelar aktif, dan hapus | ✅ |
+| 5c | Jadwal Standby: form tambah dan ubah jadwal di aplikasi, serta banner Standby di Dashboard | ✅ |
 | 6 | Pengaturan: tabel `device_config`, API, layar Pengaturan (batas kelembapan, post-run, kecepatan maksimum) | ⏳ |
 | 7 | Hardware asli: ESP32, fan PC 4-pin (PWM 25 kHz), adaptor 12V, ground bersama, pengujian di kamar mandi | ⏳ |
 | 8 | Penguatan: MQTT Last Will, fallback offline di firmware, validasi sertifikat TLS, HTTPS dan autentikasi API | ⏳ |
@@ -297,7 +298,7 @@ Legenda: ✅ selesai, 🔄 sedang dikerjakan, ⏳ belum.
 
 ### Posisi sekarang
 
-**Tahap 5b**: kode layar Jadwal (daftar, sakelar, hapus) sudah dibuat dan tinggal dikonfirmasi berjalan di HP. **Langkah berikutnya: 5c**, yaitu form tambah dan ubah jadwal.
+**Tahap 6**: layar Pengaturan (batas kelembapan, durasi post-run, kecepatan maksimum). Jadwal Standby sudah lengkap dari ujung ke ujung.
 
 ### Perubahan dari rancangan awal
 

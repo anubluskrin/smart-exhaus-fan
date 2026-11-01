@@ -199,6 +199,7 @@ class _DashboardPageState extends State<DashboardPage> {
     final color = h == null ? kAccent : humidityColor(h);
     final mode = _pendingMode ?? s?.mode ?? 'auto';
     final power = _pendingPower ?? s?.power ?? true;
+    final standby = power && s?.state == 'STANDBY';
 
     return Scaffold(
       body: SafeArea(
@@ -230,6 +231,10 @@ class _DashboardPageState extends State<DashboardPage> {
               const SizedBox(height: 16),
               _hero(s, power ? color : const Color(0xFF4B5F7F)),
               const SizedBox(height: 16),
+              if (standby) ...[
+                _standbyBanner(),
+                const SizedBox(height: 16),
+              ],
               Row(
                 children: [
                   Expanded(child: _fanCard(s)),
@@ -241,7 +246,13 @@ class _DashboardPageState extends State<DashboardPage> {
               _modeSelector(mode),
               if (mode == 'manual') ...[
                 const SizedBox(height: 16),
-                _speedCard(),
+                IgnorePointer(
+                  ignoring: standby,
+                  child: Opacity(
+                  opacity: standby ? 0.4 : 1,
+                  child: _speedCard(),
+                  ),
+                ),
               ],
 
               if (_error != null)
@@ -378,6 +389,41 @@ class _DashboardPageState extends State<DashboardPage> {
             ],
           ),
         ),
+      ),
+    );
+  }
+
+    Widget _standbyBanner() {
+    const color = Color(0xFFA9B8FF);
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: color.withValues(alpha: 0.6)),
+        color: color.withValues(alpha: 0.12),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: const [
+          Icon(Icons.bedtime_outlined, color: color),
+          SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Standby aktif',
+                  style: TextStyle(fontWeight: FontWeight.w700, fontSize: 15),
+                ),
+                SizedBox(height: 2),
+                Text(
+                  'Fan tidak menyala otomatis, kecuali kelembapan mencapai 90 %.',
+                  style: TextStyle(fontSize: 13, color: kMuted),
+                ),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }
