@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 
 import 'constants.dart';
+import 'schedule_form.dart';
 
 class Schedule {
   final int id;
@@ -156,6 +157,38 @@ class _SchedulesPageState extends State<SchedulesPage> {
     }
   }
 
+    Future<void> _openForm([Schedule? s]) async {
+    final result = await Navigator.of(context).push<Map<String, dynamic>>(
+      MaterialPageRoute(
+        builder: (_) => ScheduleFormPage(
+          editing: s != null,
+          name: s?.name ?? '',
+          start: s?.start ?? '22:00',
+          end: s?.end ?? '05:00',
+          days: s?.days ?? const [1, 2, 3, 4, 5, 6, 7],
+        ),
+      ),
+    );
+    if (result == null || !mounted) return;
+    try {
+      final uri = s == null
+          ? Uri.parse('$kBaseUrl/api/schedules')
+          : Uri.parse('$kBaseUrl/api/schedules/${s.id}');
+      final headers = {'Content-Type': 'application/json'};
+      final body = jsonEncode(result);
+      final res = await (s == null
+              ? http.post(uri, headers: headers, body: body)
+              : http.put(uri, headers: headers, body: body))
+          .timeout(const Duration(seconds: 8));
+      if (res.statusCode != 200 && res.statusCode != 201) {
+        throw Exception('HTTP ${res.statusCode}');
+      }
+      await _load();
+    } catch (_) {
+      _snack('Gagal menyimpan jadwal');
+    }
+  }
+
   Widget _item(Schedule s) {
     return Container(
       padding: const EdgeInsets.fromLTRB(16, 12, 8, 12),
@@ -201,6 +234,11 @@ class _SchedulesPageState extends State<SchedulesPage> {
             activeThumbColor: Colors.white,
             inactiveTrackColor: kLine,
             inactiveThumbColor: kMuted,
+          ),
+          IconButton(
+            tooltip: 'Ubah jadwal',
+            onPressed: () => _openForm(s),
+            icon: const Icon(Icons.edit_outlined, color: kMuted),
           ),
           IconButton(
             tooltip: 'Hapus jadwal',
@@ -255,6 +293,22 @@ class _SchedulesPageState extends State<SchedulesPage> {
         children.add(const SizedBox(height: 12));
       }
     }
+
+        children.add(
+      OutlinedButton.icon(
+        onPressed: () => _openForm(),
+        icon: const Icon(Icons.add),
+        label: const Text('Tambah jadwal'),
+        style: OutlinedButton.styleFrom(
+          foregroundColor: kAccent,
+          side: const BorderSide(color: kAccent, width: 2),
+          minimumSize: const Size.fromHeight(52),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(14),
+          ),
+        ),
+      ),
+    );
 
     return Scaffold(
       body: SafeArea(
