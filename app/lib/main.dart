@@ -8,6 +8,7 @@ import 'air_flow.dart';
 import 'constants.dart';
 import 'stats_page.dart';
 import 'schedules_page.dart';
+import 'settings_page.dart';
 
 // Dengan "adb reverse", HP menjangkau backend lewat localhost.
 // (Untuk emulator Android, ganti menjadi http://10.0.2.2:3000)
@@ -629,7 +630,7 @@ class _HomeShellState extends State<HomeShell> {
           DashboardPage(),
           StatsPage(),
           SchedulesPage(),
-          _ComingSoon('Pengaturan'),
+          SettingsPage(),
         ],
       ),
       bottomNavigationBar: NavigationBar(
