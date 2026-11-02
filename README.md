@@ -10,9 +10,7 @@
 
 Proyek IoT empat layer: exhaust fan kamar mandi yang menyala otomatis berdasarkan kelembapan udara, bisa dipantau dan dikendalikan dari aplikasi Android, serta menyimpan riwayat data untuk ditampilkan sebagai grafik.
 
-> **Status saat ini:** Tahap 0 sampai 5 selesai (termasuk Jadwal Standby). **Tahap 6 (Pengaturan) berikutnya.** Lihat [Tahapan pengerjaan](#tahapan-pengerjaan).
-(#tahapan-pengerjaan).
-
+> **Status saat ini:** Tahap 0 sampai 6 selesai (Jadwal Standby dan Pengaturan sudah lengkap). **Berikutnya: hardware asli dan penguatan.** Lihat [Tahapan pengerjaan](#tahapan-pengerjaan).
 ---
 
 ## Daftar isi
@@ -74,6 +72,7 @@ Data sensor mengalir naik dari Layer 1 ke Layer 4. Perintah pengguna mengalir tu
 - Grafik riwayat kelembapan dan kecepatan fan (1 jam, 24 jam, 7 hari) beserta ringkasan.
 - **Jadwal Standby**: pada rentang waktu tertentu fan tidak menyala otomatis (kecuali kelembapan kritis). Penjadwalnya berjalan di backend (zona waktu WIB).
 - Pengaman: kalau kiriman Standby dari backend berhenti selama 3 menit, firmware kembali ke Auto.
+- **Pengaturan**: batas kelembapan menyala dan mati, durasi post-run, dan kecepatan maksimum dapat diubah dari aplikasi, dengan tombol **Kembalikan ke bawaan**. Pengaturan disimpan di database dan dikirim ke perangkat (pesan retained, jadi perangkat yang baru menyala langsung mendapatkannya).
 
 ## Teknologi
 
@@ -244,8 +243,9 @@ PostgreSQL berjalan otomatis sebagai layanan Windows.
 | `bathfan/{id}/cmd/speed` | ke ESP32 | `{"pwm":70}` (0 sampai 100, berlaku di mode manual) |
 | `bathfan/{id}/cmd/power` | ke ESP32 | `{"on":true}` atau `{"on":false}` |
 | `bathfan/{id}/cmd/standby` | backend ke ESP32 (tiap sekitar 1 menit dan saat berubah) | `{"active":true}` |
+| `bathfan/{id}/cmd/config` | backend ke ESP32 (retained) | `{"hum_on":70,"hum_off":60,"post_run_sec":300,"max_pwm":100}` |
 
-Perintah dikirim dengan retain mati, supaya tidak terulang saat perangkat tersambung kembali.
+Perintah dikirim dengan retain mati, supaya tidak terulang saat perangkat tersambung kembali. Pengecualiannya cmd/config, yang retained supaya perangkat selalu mendapat pengaturan terbaru.
 
 ### REST API (`http://localhost:3000`)
 
@@ -260,6 +260,9 @@ Perintah dikirim dengan retain mati, supaya tidak terulang saat perangkat tersam
 | `POST /api/schedules` | Tambah jadwal: `{"name","start_time":"HH:MM","end_time":"HH:MM","days":[1..7],"enabled"}` |
 | `PUT /api/schedules/:id` | Ubah sebagian atau seluruh isi jadwal |
 | `DELETE /api/schedules/:id` | Hapus jadwal |
+| `GET /api/config` | Pengaturan saat ini beserta nilai bawaannya |
+| `PUT /api/config` | Ubah sebagian atau semua: `hum_on`, `hum_off`, `post_run_sec`, `max_pwm` (divalidasi: `hum_on` paling tinggi 85, `hum_off` paling rendah 40, selisih minimal 5, post-run 0 sampai 3600 detik, kecepatan maksimum 30 sampai 100) |
+| `POST /api/config/reset` | Kembalikan semua pengaturan ke nilai bawaan |
 
 Hari berlaku: 1 = Senin sampai 7 = Minggu. Rentang yang melewati tengah malam (misalnya 22:00 sampai 05:00) didukung. Semua input divalidasi sebelum diteruskan.
 
@@ -275,7 +278,7 @@ Dari prioritas tertinggi ke terendah:
 | 4 | **Manual**: fan mengikuti kecepatan yang diatur pengguna |
 | 5 | **Auto**: menyala di atas 70 persen, mati di bawah 60 persen (hysteresis), lalu post-run |
 
-Konstanta firmware: `HUM_ON` 70, `HUM_OFF` 60, `MIN_SPEED` 30, `HUM_CRITICAL` 90, `POSTRUN_MS` 10000 (untuk pengujian; nilai pemakaian nyata 300000 atau 5 menit), `STANDBY_TIMEOUT_MS` 180000.
+Batas menyala, batas mati, post-run, dan kecepatan maksimum kini diatur dari aplikasi (bawaan 70 %, 60 %, 5 menit, 100 %). Konstanta tetap di firmware: `MIN_SPEED` 30, `HUM_CRITICAL` 90, `STANDBY_TIMEOUT_MS` 180000.
 
 ## Tahapan pengerjaan
 
@@ -291,14 +294,14 @@ Legenda: ✅ selesai, 🔄 sedang dikerjakan, ⏳ belum.
 | 5a | Jadwal Standby: tabel `schedules`, API jadwal, penjadwal backend, firmware (Standby dan pengaman 3 menit) | ✅ |
 | 5b | Jadwal Standby: layar Jadwal di aplikasi, bagian daftar, sakelar aktif, dan hapus | ✅ |
 | 5c | Jadwal Standby: form tambah dan ubah jadwal di aplikasi, serta banner Standby di Dashboard | ✅ |
-| 6 | Pengaturan: tabel `device_config`, API, layar Pengaturan (batas kelembapan, post-run, kecepatan maksimum) | ⏳ |
+| 6 | Pengaturan: tabel `device_config`, API, layar Pengaturan (batas kelembapan, post-run, kecepatan maksimum) | ✅ |
 | 7 | Hardware asli: ESP32, fan PC 4-pin (PWM 25 kHz), adaptor 12V, ground bersama, pengujian di kamar mandi | ⏳ |
 | 8 | Penguatan: MQTT Last Will, fallback offline di firmware, validasi sertifikat TLS, HTTPS dan autentikasi API | ⏳ |
 | 9 | Pengujian skenario, pembaruan laporan, dan persiapan demo | ⏳ |
 
 ### Posisi sekarang
 
-**Tahap 6**: layar Pengaturan (batas kelembapan, durasi post-run, kecepatan maksimum). Jadwal Standby sudah lengkap dari ujung ke ujung.
+**Tahap 7**: hardware asli (ESP32 dan fan 4-pin). Sebelum itu, pengaturan dan jadwal sudah teruji lengkap di simulasi.
 
 ### Perubahan dari rancangan awal
 
