@@ -14,9 +14,10 @@
 const char* DEVICE_ID = "fan01";
 
 // Pengaturan logika Auto
-const float HUM_ON = 70.0;
-const float HUM_OFF = 60.0;
-const unsigned long POSTRUN_MS = 10000;
+float HUM_ON = 70.0;
+float HUM_OFF = 60.0;
+unsigned long POSTRUN_MS = 10000;
+int MAX_PWM = 100;
 const int MIN_SPEED = 30;
 
 // Jadwal waktu
@@ -35,6 +36,10 @@ float lastHum = 0, lastTemp = 0;
 bool manualMode = false;
 int manualSpeed = 0;
 bool powerOn = true;
+bool standbyActive = false;
+unsigned long lastStandbyMsg = 0;
+const float HUM_CRITICAL = 90.0;
+const unsigned long STANDBY_TIMEOUT_MS = 180000;
 
 DHT dht(DHT_PIN, DHT_TYPE);
 WiFiClientSecure net;
@@ -44,6 +49,8 @@ String topicCmdAll;
 String topicCmdMode;
 String topicCmdSpeed;
 String topicCmdPower;
+String topicCmdStandby;
+String topicCmdConfig;
 
 void setFanSpeed(int percent) {
   percent = constrain(percent, 0, 100);
@@ -52,7 +59,7 @@ void setFanSpeed(int percent) {
 
 int humidityToSpeed(float h) {
   int s = map((long)h, (long)HUM_OFF, 90, MIN_SPEED, 100);
-  return constrain(s, MIN_SPEED, 100);
+  return constrain(s, MIN_SPEED, MAX_PWM);
 }
 
 const char* stateName(State s) {
@@ -86,6 +93,10 @@ void connectMqtt() {
   }
 }
 
+bool standbyIsActive() {
+  return standbyActive && (millis() - lastStandbyMsg < STANDBY_TIMEOUT_MS);
+}
+
 void updateControl(float h) {
   int speed = 0;
 
@@ -95,8 +106,16 @@ void updateControl(float h) {
     return;
   }
 
+    if (standbyIsActive()) {
+    state = IDLE;
+    speed = (h >= HUM_CRITICAL) ? humidityToSpeed(h) : 0;
+    currentSpeed = speed;
+    setFanSpeed(speed);
+    return;
+  }
+
   if (manualMode) {
-    speed = manualSpeed;
+    speed = min(manualSpeed, MAX_PWM);
   } else {
     switch (state) {
       case IDLE:
@@ -133,7 +152,10 @@ void publishTelemetry() {
   doc["pwm"] = currentSpeed;
   doc["mode"] = manualMode ? "manual" : "auto";
   doc["power"] = powerOn;
-  doc["state"] = !powerOn ? "OFF" : (manualMode ? "MANUAL" : stateName(state));
+  doc["standby"] = standbyIsActive();
+  doc["state"] = !powerOn ? "OFF"
+               : (standbyIsActive() ? "STANDBY"
+               : (manualMode ? "MANUAL" : stateName(state)));
 
   char buf[200];
   serializeJson(doc, buf);
@@ -181,6 +203,41 @@ void onMessage(char* topic, byte* payload, unsigned int length) {
     if (!powerOn) state = IDLE;
     Serial.printf("Daya: %s\n", powerOn ? "ON" : "OFF");
 
+    } else if (t == topicCmdStandby) {
+    if (!doc["active"].is<bool>()) {
+      Serial.println("Perintah ditolak: active harus true atau false");
+      return;
+    }
+    bool a = doc["active"].as<bool>();
+    if (a != standbyActive) {
+      Serial.printf("Standby: %s\n", a ? "AKTIF" : "tidak aktif");
+    }
+    standbyActive = a;
+    lastStandbyMsg = millis();
+
+    } else if (t == topicCmdConfig) {
+    if (!doc["hum_on"].is<float>() || !doc["hum_off"].is<float>() ||
+        !doc["post_run_sec"].is<int>() || !doc["max_pwm"].is<int>()) {
+      Serial.println("Konfigurasi ditolak: isi tidak lengkap");
+      return;
+    }
+    float on = doc["hum_on"].as<float>();
+    float off = doc["hum_off"].as<float>();
+    long pr = doc["post_run_sec"].as<long>();
+    int mp = doc["max_pwm"].as<int>();
+    if (off < 40 || on > 85 || on - off < 5 || pr < 0 || pr > 3600 ||
+        mp < 30 || mp > 100) {
+      Serial.println("Konfigurasi ditolak: nilai di luar batas");
+      return;
+    }
+    HUM_ON = on;
+    HUM_OFF = off;
+    POSTRUN_MS = (unsigned long)pr * 1000UL;
+    MAX_PWM = mp;
+    Serial.printf("Konfigurasi: on=%.0f off=%.0f postrun=%ld dtk max=%d%%\n",
+                  HUM_ON, HUM_OFF, pr, MAX_PWM);
+    return;
+
   } else {
     return;
   }
@@ -200,6 +257,8 @@ void setup() {
   topicCmdMode = base + "/cmd/mode";
   topicCmdSpeed = base + "/cmd/speed";
   topicCmdPower = base + "/cmd/power";
+  topicCmdStandby = base + "/cmd/standby";
+  topicCmdConfig = base + "/cmd/config";
 
   connectWifi();
   net.setInsecure();   // sementara untuk pengembangan, diperketat di Tahap 8

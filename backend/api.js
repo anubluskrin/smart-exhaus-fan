@@ -280,6 +280,147 @@ function startApi(mqttClient) {
     }
   });
 
+    // ===== Pengaturan perangkat =====
+  const DEFAULT_CONFIG = {
+    hum_on: 70,
+    hum_off: 60,
+    post_run_sec: 300,
+    max_pwm: 100,
+  };
+  const CONFIG_KEYS = Object.keys(DEFAULT_CONFIG);
+
+  function checkConfig(c) {
+    if (!Number.isFinite(c.hum_on) || !Number.isFinite(c.hum_off)) {
+      return 'hum_on dan hum_off harus angka';
+    }
+    if (c.hum_off < 40) return 'hum_off minimal 40';
+    if (c.hum_on > 85) return 'hum_on maksimal 85';
+    if (c.hum_on - c.hum_off < 5) {
+      return 'selisih hum_on dan hum_off minimal 5';
+    }
+    if (!Number.isInteger(c.post_run_sec) || c.post_run_sec < 0 || c.post_run_sec > 3600) {
+      return 'post_run_sec harus bilangan bulat 0 sampai 3600';
+    }
+    if (!Number.isInteger(c.max_pwm) || c.max_pwm < 30 || c.max_pwm > 100) {
+      return 'max_pwm harus bilangan bulat 30 sampai 100';
+    }
+    return null;
+  }
+
+  async function readConfig(device) {
+    await pool.query(
+      'INSERT INTO device_config (device_id) VALUES ($1) ON CONFLICT DO NOTHING',
+      [device]
+    );
+    const { rows } = await pool.query(
+      'SELECT hum_on, hum_off, post_run_sec, max_pwm FROM device_config WHERE device_id = $1',
+      [device]
+    );
+    return rows[0];
+  }
+
+  async function writeConfig(device, c) {
+    await pool.query(
+      `UPDATE device_config
+       SET hum_on = $2, hum_off = $3, post_run_sec = $4, max_pwm = $5, updated_at = now()
+       WHERE device_id = $1`,
+      [device, c.hum_on, c.hum_off, c.post_run_sec, c.max_pwm]
+    );
+  }
+
+    function publishConfig(device, config) {
+    if (!mqttClient.connected) return;
+    mqttClient.publish(
+      `bathfan/${device}/cmd/config`,
+      JSON.stringify({
+        hum_on: config.hum_on,
+        hum_off: config.hum_off,
+        post_run_sec: config.post_run_sec,
+        max_pwm: config.max_pwm,
+      }),
+      { qos: 1, retain: true }
+    );
+  }
+
+  async function afterConfigChange(device, config) {
+    publishConfig(device, config);
+  }
+
+  async function syncAllConfigs() {
+    try {
+      const { rows } = await pool.query(
+        'SELECT device_id, hum_on, hum_off, post_run_sec, max_pwm FROM device_config'
+      );
+      for (const r of rows) publishConfig(r.device_id, r);
+    } catch (e) {
+      console.error('Gagal mengirim konfigurasi:', e.message);
+    }
+  }
+
+  mqttClient.on('connect', syncAllConfigs);
+  if (mqttClient.connected) syncAllConfigs();
+
+  app.get('/api/config', async (req, res) => {
+    const device = req.query.device || 'fan01';
+    if (!DEVICE_RE.test(device)) {
+      return res.status(400).json({ error: 'nama perangkat tidak valid' });
+    }
+    try {
+      res.json({ device, config: await readConfig(device), defaults: DEFAULT_CONFIG });
+    } catch (e) {
+      console.error('Gagal membaca pengaturan:', e.message);
+      res.status(500).json({ error: 'gagal membaca database' });
+    }
+  });
+
+  app.put('/api/config', async (req, res) => {
+    const body = req.body || {};
+    const device = body.device || 'fan01';
+    if (!DEVICE_RE.test(device)) {
+      return res.status(400).json({ error: 'nama perangkat tidak valid' });
+    }
+    const changes = {};
+    for (const k of CONFIG_KEYS) {
+      if (body[k] !== undefined) {
+        if (typeof body[k] !== 'number') {
+          return res.status(400).json({ error: `${k} harus berupa angka` });
+        }
+        changes[k] = body[k];
+      }
+    }
+    if (Object.keys(changes).length === 0) {
+      return res.status(400).json({ error: 'tidak ada yang diubah' });
+    }
+    try {
+      const merged = { ...(await readConfig(device)), ...changes };
+      const err = checkConfig(merged);
+      if (err) return res.status(400).json({ error: err });
+      await writeConfig(device, merged);
+      await afterConfigChange(device, merged);
+      res.json({ device, config: merged, defaults: DEFAULT_CONFIG });
+    } catch (e) {
+      console.error('Gagal menyimpan pengaturan:', e.message);
+      res.status(500).json({ error: 'gagal menyimpan pengaturan' });
+    }
+  });
+
+  app.post('/api/config/reset', async (req, res) => {
+    const body = req.body || {};
+    const device = body.device || 'fan01';
+    if (!DEVICE_RE.test(device)) {
+      return res.status(400).json({ error: 'nama perangkat tidak valid' });
+    }
+    try {
+      await readConfig(device);
+      await writeConfig(device, DEFAULT_CONFIG);
+      await afterConfigChange(device, DEFAULT_CONFIG);
+      res.json({ device, config: DEFAULT_CONFIG, defaults: DEFAULT_CONFIG });
+    } catch (e) {
+      console.error('Gagal mereset pengaturan:', e.message);
+      res.status(500).json({ error: 'gagal mereset pengaturan' });
+    }
+  });
+
   app.listen(PORT, () => {
     console.log(`API berjalan di http://localhost:${PORT}`);
   });

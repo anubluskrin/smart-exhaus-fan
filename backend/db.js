@@ -40,6 +40,23 @@ async function init() {
       CHECK (cardinality(days) > 0)
     )
   `);
+
+    await pool.query(`
+    CREATE TABLE IF NOT EXISTS device_config (
+      device_id TEXT PRIMARY KEY,
+      hum_on DOUBLE PRECISION NOT NULL DEFAULT 70,
+      hum_off DOUBLE PRECISION NOT NULL DEFAULT 60,
+      post_run_sec INTEGER NOT NULL DEFAULT 300,
+      max_pwm INTEGER NOT NULL DEFAULT 100,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      CHECK (hum_off >= 40 AND hum_on <= 85 AND hum_on - hum_off >= 5),
+      CHECK (post_run_sec BETWEEN 0 AND 3600),
+      CHECK (max_pwm BETWEEN 30 AND 100)
+    )
+  `);
+  await pool.query(
+    "INSERT INTO device_config (device_id) VALUES ('fan01') ON CONFLICT DO NOTHING"
+  );
 }
 
 module.exports = { pool, init };
