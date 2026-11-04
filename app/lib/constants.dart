@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 
 // Dengan "adb reverse", HP menjangkau backend lewat localhost.
 // (Untuk emulator Android, ganti menjadi http://10.0.2.2:3000)
-const String kBaseUrl = 'http://localhost:3000';
+const String kBaseUrl = 'http://192.168.110.42:3000';
 
 const Color kBg = Color(0xFF0B1D3A);
 const Color kCard = Color(0xFF112A4F);

@@ -6,9 +6,9 @@
 #include "secrets.h"
 
 #define DHT_PIN 4
-#define DHT_TYPE DHT22
+#define DHT_TYPE DHT11
 #define FAN_PIN 18
-#define PWM_FREQ 5000
+#define PWM_FREQ 25000
 #define PWM_RES 8
 
 const char* DEVICE_ID = "fan01";
@@ -70,12 +70,15 @@ const char* stateName(State s) {
 
 void connectWifi() {
   Serial.print("Menyambung WiFi");
-  WiFi.begin(WIFI_SSID, WIFI_PASS, 6);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
   }
   Serial.println(" terhubung");
+    // DNS router tidak menjawab, jadi pakai DNS publik.
+  WiFi.config(WiFi.localIP(), WiFi.gatewayIP(), WiFi.subnetMask(),
+              IPAddress(8, 8, 8, 8), IPAddress(1, 1, 1, 1));
 }
 
 void connectMqtt() {
