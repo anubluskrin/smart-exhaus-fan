@@ -1,5 +1,5 @@
-#define WIFI_SSID "Wokwi-GUEST"
-#define WIFI_PASS ""
+#define WIFI_SSID "mang"
+#define WIFI_PASS "123456789"
 
 #define MQTT_HOST "ISI_ALAMAT_BROKER"
 #define MQTT_PORT 8883

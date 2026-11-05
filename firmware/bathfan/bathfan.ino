@@ -10,6 +10,8 @@
 #define FAN_PIN 18
 #define PWM_FREQ 25000
 #define PWM_RES 8
+#define RELAY_PIN 23
+#define RELAY_ACTIVE_LOW true   // ubah ke false kalau logikanya terbalik
 
 const char* DEVICE_ID = "fan01";
 
@@ -30,6 +32,7 @@ unsigned long postrunStart = 0;
 unsigned long lastRead = 0;
 unsigned long lastPublish = 0;
 int currentSpeed = 0;
+bool relayOn = false;
 float lastHum = 0, lastTemp = 0;
 
 // Mode kontrol
@@ -52,8 +55,14 @@ String topicCmdPower;
 String topicCmdStandby;
 String topicCmdConfig;
 
+void relayWrite(bool on) {
+  relayOn = on;
+  digitalWrite(RELAY_PIN, (on ^ RELAY_ACTIVE_LOW) ? HIGH : LOW);
+}
+
 void setFanSpeed(int percent) {
   percent = constrain(percent, 0, 100);
+  relayWrite(percent > 0);   // relay menutup hanya saat fan harus berputar
   ledcWrite(FAN_PIN, map(percent, 0, 100, 0, 255));
 }
 
@@ -156,6 +165,7 @@ void publishTelemetry() {
   doc["mode"] = manualMode ? "manual" : "auto";
   doc["power"] = powerOn;
   doc["standby"] = standbyIsActive();
+  doc["relay"] = relayOn;
   doc["state"] = !powerOn ? "OFF"
                : (standbyIsActive() ? "STANDBY"
                : (manualMode ? "MANUAL" : stateName(state)));
@@ -251,6 +261,9 @@ void onMessage(char* topic, byte* payload, unsigned int length) {
 
 void setup() {
   Serial.begin(115200);
+    // Relay terbuka dulu sebelum pin dijadikan output, supaya fan tidak menyala saat boot.
+  digitalWrite(RELAY_PIN, RELAY_ACTIVE_LOW ? HIGH : LOW);
+  pinMode(RELAY_PIN, OUTPUT);
   dht.begin();
   ledcAttach(FAN_PIN, PWM_FREQ, PWM_RES);
 
