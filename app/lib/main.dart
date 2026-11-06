@@ -46,7 +46,11 @@ class FanStatus {
   }
 }
 
-void main() => runApp(const BathfanApp());
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await loadBaseUrl();
+  runApp(const BathfanApp());
+}
 
 class BathfanApp extends StatelessWidget {
   const BathfanApp({super.key});
@@ -163,9 +167,11 @@ class _DashboardPageState extends State<DashboardPage> {
         _status = FanStatus.fromJson(data);
         _error = null;
       });
-    } catch (e) {
+    } catch (e, st) {
+      debugPrint('REFRESH ERROR: $e');
+      debugPrint('$st');
       if (!mounted) return;
-      setState(() => _error = 'Tidak bisa menghubungi backend');
+      setState(() => _error = 'Gagal: $e');
     }
   }
 
