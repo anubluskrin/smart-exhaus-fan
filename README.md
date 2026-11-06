@@ -10,7 +10,7 @@
 
 Proyek IoT empat layer: exhaust fan kamar mandi yang menyala otomatis berdasarkan kelembapan udara, bisa dipantau dan dikendalikan dari aplikasi Android, serta menyimpan riwayat data untuk ditampilkan sebagai grafik.
 
-> **Status saat ini:** Tahap 0 sampai 6 selesai (Jadwal Standby dan Pengaturan sudah lengkap). **Berikutnya: hardware asli dan penguatan.** Lihat [Tahapan pengerjaan](#tahapan-pengerjaan).
+> **Status saat ini:** Tahap 0 sampai 7 selesai: seluruh fitur sudah berjalan di perangkat asli (ESP32, DHT22, fan PC 4-pin, relay, adaptor 12V), dan aplikasi Android berjalan lewat WiFi tanpa kabel. **Berikutnya: Tahap 8 (penguatan) dan Tahap 9 (pengujian dan laporan).** Lihat [Tahapan pengerjaan](#tahapan-pengerjaan).
 ---
 
 ## Daftar isi
@@ -73,6 +73,7 @@ Data sensor mengalir naik dari Layer 1 ke Layer 4. Perintah pengguna mengalir tu
 - **Jadwal Standby**: pada rentang waktu tertentu fan tidak menyala otomatis (kecuali kelembapan kritis). Penjadwalnya berjalan di backend (zona waktu WIB).
 - Pengaman: kalau kiriman Standby dari backend berhenti selama 3 menit, firmware kembali ke Auto.
 - **Pengaturan**: batas kelembapan menyala dan mati, durasi post-run, dan kecepatan maksimum dapat diubah dari aplikasi, dengan tombol **Kembalikan ke bawaan**. Pengaturan disimpan di database dan dikirim ke perangkat (pesan retained, jadi perangkat yang baru menyala langsung mendapatkannya).
+- **Relay pemutus daya**: fan PC 4-pin tidak berhenti total di PWM 0 persen, jadi relay memutus jalur +12V. Relay menutup hanya saat fan seharusnya berputar (kecepatan lebih dari 0). Dengan begitu Off, Standby, dan Auto di kelembapan rendah benar-benar mematikan fan.
 
 ## Teknologi
 
@@ -204,6 +205,27 @@ Biarkan terminal ini terbuka, karena inilah backend yang sedang berjalan. `node 
 
 **Di ESP32 asli:** pasang board ESP32 (Arduino-ESP32 core 3.x, karena kode memakai `ledcAttach`) dan library yang sama lewat Library Manager. Isi `secrets.h` dengan WiFi rumah (hanya 2,4 GHz). Ubah dua hal di `bathfan.ino`: hapus argumen channel `6` pada `WiFi.begin(WIFI_SSID, WIFI_PASS, 6)` (trik itu khusus Wokwi), dan ganti `PWM_FREQ` menjadi `25000` untuk fan PC 4-pin.
 
+#### Wiring ESP32 asli
+
+| Komponen | Sambungan |
+|---|---|
+| DHT22: VCC | 3V3 ESP32 |
+| DHT22: data | D4 (GPIO 4) |
+| DHT22: GND | rel GND |
+| Fan pin 4 (PWM) | D18 (GPIO 18) |
+| Fan pin 1 (GND, lubang berembos 1) | rel GND |
+| Fan pin 2 (+12V) | terminal **NO** relay |
+| Fan pin 3 (tach) | tidak dipakai |
+| Relay: VCC, GND, IN | 5V, GND, D23 (GPIO 23) |
+| Relay: COM | plus adaptor 12V |
+| Adaptor 12V: minus | rel GND |
+
+**Aturan keselamatan:** jalur +12V hanya lewat terminal relay dan konektor fan. Jangan pernah menancapkan kabel 12V ke breadboard atau pin ESP32 mana pun: rel breadboard biasanya sudah tersambung ke 3V3 atau 5V, dan 12V di sana merusak ESP32 dan sensor. Satu-satunya hubungan antara sisi 12V dan ESP32 adalah GND bersama. Cabut adaptor dan USB sebelum mengubah rangkaian.
+
+#### Firmware: Wokwi atau ESP32 asli
+
+`bathfan.ino` di repo adalah versi **ESP32 asli**: `WiFi.begin` tanpa channel, DNS publik 8.8.8.8 di `connectWifi` (dipakai karena DNS beberapa router tidak menjawab), `PWM_FREQ` 25000, relay di GPIO 23. ESP32 hanya mendukung WiFi **2,4 GHz**. Untuk menjalankannya di **Wokwi**, ubah `WiFi.begin(WIFI_SSID, WIFI_PASS)` menjadi `WiFi.begin(WIFI_SSID, WIFI_PASS, 6)` dan `PWM_FREQ` menjadi `5000`.
+
 ### 6. Jalankan aplikasi
 
 ```
@@ -220,6 +242,8 @@ flutter run -d <id-perangkat>
 ```
 
 Kalau `adb` tidak dikenali, tambahkan folder `platform-tools` dari Android SDK ke PATH. Perintah `adb reverse` hilang setiap kabel USB dicabut dan perlu dijalankan lagi. Untuk emulator Android, ubah `kBaseUrl` di `app/lib/constants.dart` menjadi `http://10.0.2.2:3000`.
+
+Alamat backend dapat diubah dari dalam aplikasi (layar **Pengaturan**, kartu **Alamat server**), tanpa membangun ulang. Alamat bawaan ada di `kDefaultBaseUrl` di `app/lib/constants.dart`. Untuk memakai aplikasi tanpa kabel USB, isi dengan alamat IP laptop di WiFi yang sama (misalnya `http://192.168.110.42:3000`), buka port 3000 di firewall untuk jaringan Private, dan pasang APK (`flutter build apk --release`, lalu `adb install -r build\app\outputs\flutter-apk\app-release.apk`).
 
 ## Urutan menyalakan sistem
 
@@ -238,7 +262,7 @@ PostgreSQL berjalan otomatis sebagai layanan Windows.
 
 | Topic | Arah | Isi |
 |---|---|---|
-| `bathfan/{id}/telemetry` | ESP32 ke broker (tiap 5 detik) | `{"hum":72.5,"temp":29.1,"pwm":65,"mode":"auto","power":true,"standby":false,"state":"RUNNING"}` |
+| `bathfan/{id}/telemetry` | ESP32 ke broker (tiap 5 detik) | `{"hum":72.5,"temp":29.1,"pwm":65,"mode":"auto","power":true,"standby":false,"relay":true,"state":"RUNNING"}` |
 | `bathfan/{id}/cmd/mode` | ke ESP32 | `{"mode":"auto"}` atau `{"mode":"manual"}` |
 | `bathfan/{id}/cmd/speed` | ke ESP32 | `{"pwm":70}` (0 sampai 100, berlaku di mode manual) |
 | `bathfan/{id}/cmd/power` | ke ESP32 | `{"on":true}` atau `{"on":false}` |
@@ -295,13 +319,13 @@ Legenda: ✅ selesai, 🔄 sedang dikerjakan, ⏳ belum.
 | 5b | Jadwal Standby: layar Jadwal di aplikasi, bagian daftar, sakelar aktif, dan hapus | ✅ |
 | 5c | Jadwal Standby: form tambah dan ubah jadwal di aplikasi, serta banner Standby di Dashboard | ✅ |
 | 6 | Pengaturan: tabel `device_config`, API, layar Pengaturan (batas kelembapan, post-run, kecepatan maksimum) | ✅ |
-| 7 | Hardware asli: ESP32, fan PC 4-pin (PWM 25 kHz), adaptor 12V, ground bersama, pengujian di kamar mandi | ⏳ |
+| 7 | Hardware asli: ESP32, fan PC 4-pin (PWM 25 kHz), adaptor 12V, ground bersama, pengujian di kamar mandi | ✅ |
 | 8 | Penguatan: MQTT Last Will, fallback offline di firmware, validasi sertifikat TLS, HTTPS dan autentikasi API | ⏳ |
 | 9 | Pengujian skenario, pembaruan laporan, dan persiapan demo | ⏳ |
 
 ### Posisi sekarang
 
-**Tahap 7**: hardware asli (ESP32 dan fan 4-pin). Sebelum itu, pengaturan dan jadwal sudah teruji lengkap di simulasi.
+**Tahap 8**: penguatan. Dimulai dari fallback offline di firmware.
 
 ### Perubahan dari rancangan awal
 
