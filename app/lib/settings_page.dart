@@ -67,10 +67,22 @@ class _SettingsPageState extends State<SettingsPage> {
   String? _error;
   bool _busy = false;
 
+  final TextEditingController _addr = TextEditingController();
+  String? _addrMsg;
+  bool _addrOk = false;
+  bool _addrBusy = false;
+
   @override
   void initState() {
     super.initState();
+    _addr.text = kBaseUrl;
     _load();
+  }
+
+  @override
+  void dispose() {
+    _addr.dispose();
+    super.dispose();
   }
 
   void _snack(String msg) {
@@ -197,6 +209,191 @@ class _SettingsPageState extends State<SettingsPage> {
     }
   }
 
+  Future<(bool, String)> _probe(String base) async {
+    try {
+      final res = await http
+          .get(Uri.parse('$base/api/status'))
+          .timeout(const Duration(seconds: 5));
+      if (res.statusCode != 200) {
+        return (false, 'Server menjawab HTTP ${res.statusCode}');
+      }
+      final j = jsonDecode(res.body);
+      if (j is! Map<String, dynamic> || !j.containsKey('online')) {
+        return (false, 'Alamat ini bukan backend Bathfan');
+      }
+      final on = j['online'] == true ? 'online' : 'offline';
+      return (true, 'Terhubung. Perangkat $on');
+    } catch (_) {
+      return (false, 'Tidak bisa dijangkau. Periksa alamat, WiFi, dan firewall');
+    }
+  }
+
+  Future<void> _testAddress() async {
+    final n = normalizeBaseUrl(_addr.text);
+    if (n == null) {
+      setState(() {
+        _addrOk = false;
+        _addrMsg = 'Alamat tidak valid';
+      });
+      return;
+    }
+    setState(() {
+      _addrBusy = true;
+      _addrOk = true;
+      _addrMsg = 'Menguji...';
+    });
+    final r = await _probe(n);
+    if (!mounted) return;
+    setState(() {
+      _addrBusy = false;
+      _addrOk = r.$1;
+      _addrMsg = r.$2;
+    });
+  }
+
+  Future<void> _saveAddress() async {
+    final n = normalizeBaseUrl(_addr.text);
+    if (n == null) {
+      setState(() {
+        _addrOk = false;
+        _addrMsg = 'Alamat tidak valid';
+      });
+      return;
+    }
+    setState(() {
+      _addrBusy = true;
+      _addrOk = true;
+      _addrMsg = 'Menyimpan...';
+    });
+    final saved = await saveBaseUrl(n);
+    if (!mounted) return;
+    if (!saved) {
+      setState(() {
+        _addrBusy = false;
+        _addrOk = false;
+        _addrMsg = 'Gagal menyimpan alamat';
+      });
+      return;
+    }
+    _addr.text = n;
+    final r = await _probe(n);
+    if (!mounted) return;
+    setState(() {
+      _addrBusy = false;
+      _addrOk = r.$1;
+      _addrMsg = 'Tersimpan. ${r.$2}';
+    });
+    _load();
+  }
+
+  Future<void> _resetAddress() async {
+    _addr.text = kDefaultBaseUrl;
+    await _saveAddress();
+  }
+
+  Widget _addressCard() {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(color: kLine),
+        gradient: const LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [Color(0xFF15325C), Color(0xFF0F2646)],
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text('Alamat server', style: TextStyle(fontSize: 15)),
+          const SizedBox(height: 4),
+          const Text(
+            'Alamat backend di laptop. Isi dengan IP laptop di WiFi yang sama, '
+            'misalnya 192.168.1.8 (port 3000 ditambahkan otomatis).',
+            style: TextStyle(fontSize: 12, color: kMuted),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _addr,
+            keyboardType: TextInputType.url,
+            autocorrect: false,
+            enableSuggestions: false,
+            decoration: InputDecoration(
+              filled: true,
+              fillColor: kCard,
+              hintText: 'http://192.168.1.8:3000',
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(14),
+                borderSide: const BorderSide(color: kLine),
+              ),
+            ),
+          ),
+          if (_addrMsg != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 10),
+              child: Text(
+                _addrMsg!,
+                style: TextStyle(
+                  fontSize: 13,
+                  color: _addrOk
+                      ? const Color(0xFF4ADE80)
+                      : const Color(0xFFF87171),
+                ),
+              ),
+            ),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton(
+                  onPressed: _addrBusy ? null : _testAddress,
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: kAccent,
+                    side: BorderSide(
+                      color: _addrBusy ? kLine : kAccent,
+                      width: 2,
+                    ),
+                    minimumSize: const Size.fromHeight(48),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                  ),
+                  child: const Text('Uji koneksi'),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: FilledButton(
+                  onPressed: _addrBusy ? null : _saveAddress,
+                  style: FilledButton.styleFrom(
+                    backgroundColor: kAccent,
+                    foregroundColor: const Color(0xFF08213F),
+                    minimumSize: const Size.fromHeight(48),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                  ),
+                  child: const Text(
+                    'Simpan',
+                    style: TextStyle(fontWeight: FontWeight.w700),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton(
+              onPressed: _addrBusy ? null : _resetAddress,
+              child: const Text('Pakai alamat bawaan'),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _tile({
     required String title,
     required String valueText,
@@ -266,6 +463,9 @@ class _SettingsPageState extends State<SettingsPage> {
       ),
       const SizedBox(height: 16),
     ];
+
+    children.add(_addressCard());
+    children.add(const SizedBox(height: 16));
 
     if (e == null) {
       children.add(
