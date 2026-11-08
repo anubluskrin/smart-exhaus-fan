@@ -5,3 +5,5 @@
 #define MQTT_PORT 8883
 #define MQTT_USER "esp32-bathfan"
 #define MQTT_PASS "ISI_PASSWORD"
+
+#define SETUP_AP_PASS "ISI_PASSWORD_PORTAL"

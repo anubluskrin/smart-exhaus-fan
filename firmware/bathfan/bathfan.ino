@@ -4,6 +4,7 @@
 #include <ArduinoJson.h>
 #include <DHT.h>
 #include "secrets.h"
+#include "wifi_setup.h"
 
 #define DHT_PIN 4
 #define DHT_TYPE DHT11
@@ -103,6 +104,24 @@ void connectMqtt() {
       delay(5000);
     }
   }
+}
+
+// Tahan tombol BOOT (GPIO 0) selama 5 detik saat menyala untuk menghapus WiFi tersimpan.
+void checkWifiResetButton() {
+  pinMode(0, INPUT_PULLUP);
+  if (digitalRead(0) != LOW) return;
+  Serial.println("Tombol BOOT terdeteksi. Tahan 5 detik untuk menghapus WiFi tersimpan...");
+  unsigned long t0 = millis();
+  while (digitalRead(0) == LOW) {
+    if (millis() - t0 >= 5000) {
+      clearWifi();
+      Serial.println("WiFi tersimpan dihapus. Portal akan terbuka kalau WiFi bawaan tidak ditemukan.");
+      while (digitalRead(0) == LOW) delay(50);   // tunggu tombol dilepas
+      return;
+    }
+    delay(50);
+  }
+  Serial.println("Tombol dilepas sebelum 5 detik. Tidak ada yang dihapus.");
 }
 
 bool standbyIsActive() {
@@ -264,6 +283,7 @@ void setup() {
     // Relay terbuka dulu sebelum pin dijadikan output, supaya fan tidak menyala saat boot.
   digitalWrite(RELAY_PIN, RELAY_ACTIVE_LOW ? HIGH : LOW);
   pinMode(RELAY_PIN, OUTPUT);
+  
   dht.begin();
   ledcAttach(FAN_PIN, PWM_FREQ, PWM_RES);
 
@@ -276,7 +296,12 @@ void setup() {
   topicCmdStandby = base + "/cmd/standby";
   topicCmdConfig = base + "/cmd/config";
 
-  connectWifi();
+  checkWifiResetButton();
+  connectWifiSmart();
+  // DNS router tidak menjawab di sebagian jaringan, jadi pakai DNS publik.
+  WiFi.config(WiFi.localIP(), WiFi.gatewayIP(), WiFi.subnetMask(),
+              IPAddress(8, 8, 8, 8), IPAddress(1, 1, 1, 1));
+              
   net.setInsecure();   // sementara untuk pengembangan, diperketat di Tahap 8
   mqtt.setServer(MQTT_HOST, MQTT_PORT);
   mqtt.setBufferSize(512);
