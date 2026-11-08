@@ -1,5 +1,6 @@
 const express = require('express');
 const path = require('path');
+const crypto = require('crypto');
 const { pool } = require('./db');
 
 const PORT = 3000;
@@ -38,6 +39,41 @@ function startApi(mqttClient) {
   const app = express();
   app.use(express.json());
   app.use(express.static(path.join(__dirname, '..', 'dashboard')));
+
+    // ===== Autentikasi: kunci API =====
+  const apiKey = process.env.API_KEY || '';
+  if (apiKey.length < 24) {
+    throw new Error('API_KEY di .env belum diisi atau kurang dari 24 karakter');
+  }
+  const keyHash = crypto.createHash('sha256').update(apiKey).digest();
+
+  const failures = new Map(); // alamat -> { n, resetAt }
+  const MAX_FAILS = 10;
+  const FAIL_WINDOW_MS = 60000;
+
+  setInterval(() => {
+    const now = Date.now();
+    for (const [ip, f] of failures) {
+      if (f.resetAt <= now) failures.delete(ip);
+    }
+  }, 60000).unref();
+
+  app.use('/api', (req, res, next) => {
+    const now = Date.now();
+    const ip = req.ip;
+    const f = failures.get(ip);
+    if (f && f.resetAt > now && f.n >= MAX_FAILS) {
+      return res.status(429).json({ error: 'terlalu banyak percobaan, coba lagi nanti' });
+    }
+    const given = req.get('X-API-Key') || '';
+    const givenHash = crypto.createHash('sha256').update(given).digest();
+    if (crypto.timingSafeEqual(givenHash, keyHash)) return next();
+
+    const cur = f && f.resetAt > now ? f : { n: 0, resetAt: now + FAIL_WINDOW_MS };
+    cur.n += 1;
+    failures.set(ip, cur);
+    return res.status(401).json({ error: 'kunci API tidak ada atau salah' });
+  });
 
   app.get('/api/status', async (req, res) => {
     const device = req.query.device || 'fan01';
