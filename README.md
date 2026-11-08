@@ -10,7 +10,7 @@
 
 Proyek IoT empat layer: exhaust fan kamar mandi yang menyala otomatis berdasarkan kelembapan udara, bisa dipantau dan dikendalikan dari aplikasi Android, serta menyimpan riwayat data untuk ditampilkan sebagai grafik.
 
-> **Status saat ini:** Tahap 0 sampai 7 selesai: seluruh fitur sudah berjalan di perangkat asli (ESP32, DHT22, fan PC 4-pin, relay, adaptor 12V), dan aplikasi Android berjalan lewat WiFi tanpa kabel. **Berikutnya: Tahap 8 (penguatan) dan Tahap 9 (pengujian dan laporan).** Lihat [Tahapan pengerjaan](#tahapan-pengerjaan).
+> **Status saat ini:** Tahap 0 sampai 7 selesai (seluruh fitur berjalan di perangkat asli). **Tahap 8 (penguatan) berjalan**: autentikasi API, alamat server yang bisa diubah dari aplikasi, dan portal pengaturan WiFi sudah selesai; sisanya fallback offline, MQTT Last Will, dan validasi sertifikat TLS. Lihat [Tahapan pengerjaan](#tahapan-pengerjaan).
 ---
 
 ## Daftar isi
@@ -74,6 +74,9 @@ Data sensor mengalir naik dari Layer 1 ke Layer 4. Perintah pengguna mengalir tu
 - Pengaman: kalau kiriman Standby dari backend berhenti selama 3 menit, firmware kembali ke Auto.
 - **Pengaturan**: batas kelembapan menyala dan mati, durasi post-run, dan kecepatan maksimum dapat diubah dari aplikasi, dengan tombol **Kembalikan ke bawaan**. Pengaturan disimpan di database dan dikirim ke perangkat (pesan retained, jadi perangkat yang baru menyala langsung mendapatkannya).
 - **Relay pemutus daya**: fan PC 4-pin tidak berhenti total di PWM 0 persen, jadi relay memutus jalur +12V. Relay menutup hanya saat fan seharusnya berputar (kecepatan lebih dari 0). Dengan begitu Off, Standby, dan Auto di kelembapan rendah benar-benar mematikan fan.
+- **Autentikasi API**: semua alamat `/api/...` memerlukan header `X-API-Key`. Kunci disimpan di `.env` backend dan diisi sekali di layar Pengaturan aplikasi. Backend menolak berjalan tanpa kunci, dan membatasi percobaan salah (10 kali per menit per alamat).
+- **Alamat server dapat diubah dari aplikasi** (layar Pengaturan, kartu **Alamat server**, dengan tombol uji koneksi), jadi berpindah jaringan tidak perlu membangun ulang APK.
+- **Portal pengaturan WiFi di ESP32**: kalau WiFi tersimpan dan WiFi bawaan gagal, ESP32 membuka WiFi `Bathfan-Setup` (dengan password portal) selama 3 menit. Sambungkan dari HP, pilih WiFi tujuan dan isi passwordnya, lalu tersimpan di memori ESP32. Menahan tombol BOOT 5 detik saat menyala menghapus WiFi tersimpan.
 
 ## Teknologi
 
@@ -168,6 +171,9 @@ PGPORT=5432
 PGDATABASE=bathfan
 PGUSER=bathfan_app
 PGPASSWORD=password-bathfan-app
+API_KEY=kunci-acak-minimal-24-karakter
+
+Buat kunci acak dengan: `node -e "console.log(require('crypto').randomBytes(24).toString('hex'))"`. Isi kunci yang sama di layar Pengaturan aplikasi.
 ```
 
 Uji koneksi database, lalu jalankan:
@@ -204,6 +210,8 @@ Biarkan terminal ini terbuka, karena inilah backend yang sedang berjalan. `node 
 6. Klik **Start Simulation**.
 
 **Di ESP32 asli:** pasang board ESP32 (Arduino-ESP32 core 3.x, karena kode memakai `ledcAttach`) dan library yang sama lewat Library Manager. Isi `secrets.h` dengan WiFi rumah (hanya 2,4 GHz). Ubah dua hal di `bathfan.ino`: hapus argumen channel `6` pada `WiFi.begin(WIFI_SSID, WIFI_PASS, 6)` (trik itu khusus Wokwi), dan ganti `PWM_FREQ` menjadi `25000` untuk fan PC 4-pin.
+
+Di `secrets.h`, isi juga `SETUP_AP_PASS` (password WiFi portal `Bathfan-Setup`, 8 sampai 63 karakter). Kode portal ada di `firmware/bathfan/wifi_setup.h`.
 
 #### Wiring ESP32 asli
 
@@ -273,6 +281,8 @@ Perintah dikirim dengan retain mati, supaya tidak terulang saat perangkat tersam
 
 ### REST API (`http://localhost:3000`)
 
+Semua alamat `/api/...` memerlukan header `X-API-Key: <kunci>`. Tanpa kunci atau dengan kunci salah, backend menjawab `401`; setelah 10 percobaan salah dalam semenit dari satu alamat, `429`.
+
 | Metode dan alamat | Fungsi |
 |---|---|
 | `GET /api/status` | Data terbaru dan status online (offline kalau data lebih dari 20 detik) |
@@ -320,7 +330,10 @@ Legenda: ✅ selesai, 🔄 sedang dikerjakan, ⏳ belum.
 | 5c | Jadwal Standby: form tambah dan ubah jadwal di aplikasi, serta banner Standby di Dashboard | ✅ |
 | 6 | Pengaturan: tabel `device_config`, API, layar Pengaturan (batas kelembapan, post-run, kecepatan maksimum) | ✅ |
 | 7 | Hardware asli: ESP32, fan PC 4-pin (PWM 25 kHz), adaptor 12V, ground bersama, pengujian di kamar mandi | ✅ |
-| 8 | Penguatan: MQTT Last Will, fallback offline di firmware, validasi sertifikat TLS, HTTPS dan autentikasi API | ⏳ |
+| 8a | Penguatan: autentikasi API dengan kunci (backend dan aplikasi) | ✅ |
+| 8b | Penguatan: alamat server dapat diubah dari aplikasi, portal pengaturan WiFi di ESP32 | ✅ |
+| 8c | Penguatan: fallback offline di firmware (fan tetap bekerja tanpa WiFi, relay terbuka bila tidak ada kendali), MQTT Last Will | ⏳ |
+| 8d | Penguatan: validasi sertifikat TLS di firmware, HTTPS | ⏳ |
 | 9 | Pengujian skenario, pembaruan laporan, dan persiapan demo | ⏳ |
 
 ### Posisi sekarang
@@ -344,6 +357,7 @@ Laporan di `docs/` masih memakai rancangan awal dan perlu diperbarui di Tahap 9.
 - **Jangan commit** `backend/.env`, `firmware/bathfan/secrets.h`, atau `app/android/local.properties`. Ketiganya sudah diabaikan lewat `.gitignore`. Periksa `git status` sebelum setiap commit.
 - Sertifikat TLS di firmware belum divalidasi (`net.setInsecure()`). Ini hanya untuk pengembangan dan dijadwalkan diperbaiki di Tahap 8.
 - Aplikasi memakai `usesCleartextTraffic="true"` (HTTP biasa) untuk pengembangan. Untuk pemakaian di luar jaringan lokal, backend perlu HTTPS dan autentikasi API.
+- API dilindungi kunci (`X-API-Key`), tapi komunikasi aplikasi ke backend masih HTTP biasa, jadi kunci bisa disadap di jaringan yang tidak tepercaya. Sebelum backend dibuka ke internet, gunakan HTTPS (misalnya lewat terowongan seperti Cloudflare Tunnel).
 - Gunakan fan DC 12V dan adaptor untuk bagian di kamar mandi. Jangan menyambung ke listrik rumah secara langsung.
 - Ground adaptor 12V dan ground ESP32 harus disambung. Pin PWM fan hanya menerima sinyal kecil, dan 12V di pin itu merusak fan.
 

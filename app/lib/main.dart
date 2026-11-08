@@ -2,7 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
+import 'api_http.dart' as http;
 
 import 'air_flow.dart';
 import 'constants.dart';
@@ -49,6 +49,7 @@ class FanStatus {
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await loadBaseUrl();
+  await loadApiKey();
   runApp(const BathfanApp());
 }
 
@@ -160,6 +161,13 @@ class _DashboardPageState extends State<DashboardPage> {
       final res = await http
           .get(Uri.parse('$kBaseUrl/api/status'))
           .timeout(const Duration(seconds: 5));
+
+      if (res.statusCode == 401) {
+        if (!mounted) return;
+        setState(() => _error = 'Kunci API salah atau belum diisi. Isi di tab Pengaturan.');
+        return;
+      }
+
       if (res.statusCode != 200) throw Exception('HTTP ${res.statusCode}');
       final data = jsonDecode(res.body) as Map<String, dynamic>;
       if (!mounted) return;

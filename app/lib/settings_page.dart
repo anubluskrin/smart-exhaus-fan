@@ -1,7 +1,7 @@
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
+import 'api_http.dart' as http;
 
 import 'constants.dart';
 
@@ -68,6 +68,7 @@ class _SettingsPageState extends State<SettingsPage> {
   bool _busy = false;
 
   final TextEditingController _addr = TextEditingController();
+  final TextEditingController _key = TextEditingController();
   String? _addrMsg;
   bool _addrOk = false;
   bool _addrBusy = false;
@@ -76,12 +77,14 @@ class _SettingsPageState extends State<SettingsPage> {
   void initState() {
     super.initState();
     _addr.text = kBaseUrl;
+    _key.text = kApiKey;
     _load();
   }
 
   @override
   void dispose() {
     _addr.dispose();
+    _key.dispose();
     super.dispose();
   }
 
@@ -209,10 +212,10 @@ class _SettingsPageState extends State<SettingsPage> {
     }
   }
 
-  Future<(bool, String)> _probe(String base) async {
+  Future<(bool, String)> _probe(String base, String key) async {
     try {
       final res = await http
-          .get(Uri.parse('$base/api/status'))
+          .get(Uri.parse('$base/api/status'), headers: {'X-API-Key': key})
           .timeout(const Duration(seconds: 5));
       if (res.statusCode != 200) {
         return (false, 'Server menjawab HTTP ${res.statusCode}');
@@ -242,7 +245,7 @@ class _SettingsPageState extends State<SettingsPage> {
       _addrOk = true;
       _addrMsg = 'Menguji...';
     });
-    final r = await _probe(n);
+    final r = await _probe(n, _key.text.trim());
     if (!mounted) return;
     setState(() {
       _addrBusy = false;
@@ -265,7 +268,7 @@ class _SettingsPageState extends State<SettingsPage> {
       _addrOk = true;
       _addrMsg = 'Menyimpan...';
     });
-    final saved = await saveBaseUrl(n);
+    final saved = await saveBaseUrl(n) && await saveApiKey(_key.text);
     if (!mounted) return;
     if (!saved) {
       setState(() {
@@ -276,7 +279,7 @@ class _SettingsPageState extends State<SettingsPage> {
       return;
     }
     _addr.text = n;
-    final r = await _probe(n);
+    final r = await _probe(n, _key.text.trim());
     if (!mounted) return;
     setState(() {
       _addrBusy = false;
@@ -329,6 +332,24 @@ class _SettingsPageState extends State<SettingsPage> {
               ),
             ),
           ),
+
+          const SizedBox(height: 12),
+          TextField(
+            controller: _key,
+            obscureText: true,
+            autocorrect: false,
+            enableSuggestions: false,
+            decoration: InputDecoration(
+              labelText: 'Kunci API',
+              filled: true,
+              fillColor: kCard,
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(14),
+                borderSide: const BorderSide(color: kLine),
+              ),
+            ),
+          ),
+
           if (_addrMsg != null)
             Padding(
               padding: const EdgeInsets.only(top: 10),

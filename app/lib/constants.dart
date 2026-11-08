@@ -66,3 +66,27 @@ String humidityLabel(double h) {
   if (h < 90) return 'tinggi';
   return 'kritis';
 }
+
+// Kunci API untuk backend. Diisi dari layar Pengaturan.
+String kApiKey = '';
+
+const String _kKeyPref = 'api_key';
+
+Future<void> loadApiKey() async {
+  try {
+    final p = await SharedPreferences.getInstance();
+    kApiKey = p.getString(_kKeyPref) ?? '';
+  } catch (_) {}
+}
+
+Future<bool> saveApiKey(String key) async {
+  try {
+    final p = await SharedPreferences.getInstance();
+    final k = key.trim();
+    await p.setString(_kKeyPref, k);
+    kApiKey = k;
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
