@@ -5,8 +5,8 @@
 | :--- | :--- |
 | Hasan Rabbani | 123240005 |
 | Ahmadsyah Anshori | 123240020 |
-| Meg | 123240--- |
-| Nico | 123240--- |
+| Michael Bintang F.S.J | 123240145 |
+| Nicolaus Narindra Lianto | 123240100 |
 
 Proyek IoT empat layer: exhaust fan kamar mandi yang menyala otomatis berdasarkan kelembapan udara, bisa dipantau dan dikendalikan dari aplikasi Android, serta menyimpan riwayat data untuk ditampilkan sebagai grafik.
 
