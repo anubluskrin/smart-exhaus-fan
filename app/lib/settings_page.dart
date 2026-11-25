@@ -118,17 +118,20 @@ class _SettingsPageState extends State<SettingsPage> {
   void _onSessionChange() {
     if (!mounted) return;
     final nextOrigin = originOf(kBaseUrl);
-    final changed = nextOrigin != _activeOrigin;
+    final originChanged = nextOrigin != _activeOrigin;
+    final shouldReset = originChanged || !isAdminSession;
     setState(() {
-      if (changed) {
+      if (originChanged) {
         _activeOrigin = nextOrigin;
+      }
+      if (shouldReset) {
         _saved = null;
         _defaults = null;
         _edit = null;
         _error = null;
       }
     });
-    if (changed && widget.isActive) {
+    if ((shouldReset || _edit == null) && widget.isActive) {
       _load();
     }
   }
@@ -159,7 +162,12 @@ class _SettingsPageState extends State<SettingsPage> {
           .timeout(const Duration(seconds: 8));
       if (!mounted || epoch != kSessionEpoch || origin != originOf(kBaseUrl)) return;
       if (res.statusCode == 401) {
-        setState(() => _error = 'Pengaturan perangkat memerlukan akses Admin.');
+        setState(() {
+          _saved = null;
+          _defaults = null;
+          _edit = null;
+          _error = 'Pengaturan perangkat memerlukan akses Admin.';
+        });
         return;
       }
       if (res.statusCode != 200) throw Exception('HTTP ${res.statusCode}');

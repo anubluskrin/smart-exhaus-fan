@@ -680,3 +680,92 @@ test('POST /api/feedback menolak payload > 16 KiB dan history cache pulih sesuda
     assert.equal(calls, 2);
   });
 });
+
+test('Admin POST /api/config/reset, PUT /api/config, 403 perangkat, dan FEEDBACK_HOURLY_LIMIT lintas IP', async () => {
+  const queries = [];
+  const published = [];
+  const mockPool = {
+    async query(sql, params = []) {
+      queries.push({ sql, params });
+      if (/FROM device_config/i.test(sql) && /SELECT/i.test(sql)) {
+        return { rows: [] };
+      }
+      if (/INSERT INTO feedback/i.test(sql)) {
+        return { rows: [{ id: 1, created_at: new Date() }] };
+      }
+      return { rows: [] };
+    },
+  };
+  const mockMqtt = {
+    connected: true,
+    on() {},
+    publish(topic, payload, opts) {
+      published.push({ topic, payload: JSON.parse(payload), opts });
+    },
+  };
+
+  const app = createApp(mockMqtt, {
+    pool: mockPool,
+    env: {
+      API_KEY: VALID_KEY,
+      APP_PROFILE: 'bazar',
+      ALLOWED_DEVICES: 'fan01',
+      TRUST_PROXY: 'loopback',
+      FEEDBACK_HOURLY_LIMIT: '3',
+    },
+  });
+
+  await withTestServer(app, async (base) => {
+    // Disallowed device ditolak 403 bahkan untuk Admin
+    const forbidden = await fetch(`${base}/api/status?device=fan99`, {
+      headers: { 'X-API-Key': VALID_KEY },
+    });
+    assert.equal(forbidden.status, 403);
+
+    // PUT /api/config memvalidasi selisih smoke_on - smoke_off >= 50
+    const badSmoke = await fetch(`${base}/api/config`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': VALID_KEY },
+      body: JSON.stringify({ smoke_on: 120, smoke_off: 100 }),
+    });
+    assert.equal(badSmoke.status, 400);
+
+    const goodPut = await fetch(`${base}/api/config`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': VALID_KEY },
+      body: JSON.stringify({ smoke_on: 300, smoke_off: 120 }),
+    });
+    assert.equal(goodPut.status, 200);
+
+    // POST /api/config/reset di profil bazar mereset post_run_sec ke 60 dan memublikasikan cmd/config retained
+    const resetRes = await fetch(`${base}/api/config/reset`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': VALID_KEY },
+      body: '{}',
+    });
+    assert.equal(resetRes.status, 200);
+    const resetJson = await resetRes.json();
+    assert.equal(resetJson.config.post_run_sec, 60);
+    const lastPub = published.at(-1);
+    assert.equal(lastPub.topic, 'bathfan/fan01/cmd/config');
+    assert.equal(lastPub.payload.post_run_sec, 60);
+    assert.equal(lastPub.opts.retain, true);
+
+    // Kuota total stand FEEDBACK_HOURLY_LIMIT=3 berlaku lintas IP (via loopback X-Forwarded-For)
+    for (const ip of ['198.51.100.1', '198.51.100.2', '198.51.100.3']) {
+      const r = await fetch(`${base}/api/feedback`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': ip },
+        body: JSON.stringify({ rating: 5, comment: 'Bagus' }),
+      });
+      assert.equal(r.status, 201);
+    }
+    const standFull = await fetch(`${base}/api/feedback`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': '198.51.100.4' },
+      body: JSON.stringify({ rating: 5, comment: 'Keempat' }),
+    });
+    assert.equal(standFull.status, 429);
+    assert.ok(Number(standFull.headers.get('retry-after')) >= 1);
+  });
+});

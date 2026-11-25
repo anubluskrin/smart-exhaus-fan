@@ -91,7 +91,8 @@ class _SchedulesPageState extends State<SchedulesPage> {
   void _onSessionChange() {
     if (!mounted) return;
     final nextOrigin = originOf(kBaseUrl);
-    if (nextOrigin != _activeOrigin) {
+    final originChanged = nextOrigin != _activeOrigin;
+    if (originChanged || !isAdminSession) {
       setState(() {
         _activeOrigin = nextOrigin;
         _items = null;
@@ -100,6 +101,7 @@ class _SchedulesPageState extends State<SchedulesPage> {
       if (widget.isActive) _load();
     } else {
       setState(() {});
+      if (widget.isActive && _items == null) _load();
     }
   }
 
@@ -129,7 +131,10 @@ class _SchedulesPageState extends State<SchedulesPage> {
           .timeout(const Duration(seconds: 8));
       if (!mounted || epoch != kSessionEpoch || origin != originOf(kBaseUrl)) return;
       if (res.statusCode == 401) {
-        setState(() => _error = 'Jadwal memerlukan akses Admin di Pengaturan');
+        setState(() {
+          _items = null;
+          _error = 'Jadwal memerlukan akses Admin di Pengaturan';
+        });
         return;
       }
       if (res.statusCode != 200) throw Exception('HTTP ${res.statusCode}');

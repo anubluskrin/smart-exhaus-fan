@@ -236,9 +236,12 @@ class _DashboardPageState extends State<DashboardPage> {
     if (!mounted) return;
     final nextOrigin = originOf(kBaseUrl);
     final originChanged = nextOrigin != _activeOrigin;
+    final clearedProtected = originChanged || !isAdminSession;
     setState(() {
       if (originChanged) {
         _activeOrigin = nextOrigin;
+      }
+      if (clearedProtected) {
         _status = null;
         _fetchedAt = null;
         _error = null;
@@ -246,7 +249,7 @@ class _DashboardPageState extends State<DashboardPage> {
       _pendingMode = null;
       _pendingPower = null;
     });
-    if (originChanged && widget.isActive) {
+    if ((originChanged || (!isAdminSession && widget.isActive)) && widget.isActive) {
       _refresh();
     }
   }
@@ -357,7 +360,11 @@ class _DashboardPageState extends State<DashboardPage> {
       }
 
       if (res.statusCode == 401) {
-        setState(() => _error = 'Server membutuhkan kunci Admin di tab Pengaturan.');
+        setState(() {
+          _status = null;
+          _fetchedAt = null;
+          _error = 'Server membutuhkan kunci Admin di tab Pengaturan.';
+        });
         return;
       }
 

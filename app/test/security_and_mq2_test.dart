@@ -6,6 +6,7 @@ import 'package:bathfan_app/constants.dart';
 import 'package:bathfan_app/feedback_page.dart';
 import 'package:bathfan_app/main.dart';
 import 'package:bathfan_app/schedules_page.dart';
+import 'package:bathfan_app/settings_page.dart';
 import 'package:bathfan_app/stats_page.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -526,5 +527,261 @@ void main() {
     await tester.pump();
     expect(find.text('Offline'), findsOneWidget);
     expect(find.text('Normal'), findsNothing);
+  });
+
+  testWidgets('logout Admin di profil real membersihkan data lama saat 401 di Jadwal, Statistik, dan Pengaturan', (tester) async {
+    const originA = 'https://origin-a.example.com';
+    SharedPreferences.setMockInitialValues({'base_url': originA});
+    await initAppConfig(trustedAdminOriginOverride: originA, isDebugMode: false);
+
+    api_http.testHttpClient = MockClient((req) async {
+      if (req.url.path == '/api/admin/verify') {
+        return http.Response(jsonEncode({'ok': true, 'role': 'admin'}), 200);
+      }
+      if (req.headers['X-API-Key'] != 'admin-secret-key') {
+        return http.Response(jsonEncode({'error': 'kunci API diperlukan'}), 401);
+      }
+      if (req.url.path == '/api/schedules') {
+        return http.Response(
+          jsonEncode({
+            'device': 'fan01',
+            'schedules': [
+              {
+                'id': 1,
+                'name': 'Jadwal Rahasia',
+                'start_time': '22:00',
+                'end_time': '05:00',
+                'days': [1, 2, 3],
+                'enabled': true,
+              },
+            ],
+          }),
+          200,
+        );
+      }
+      if (req.url.path == '/api/history') {
+        return http.Response(
+          jsonEncode({
+            'device': 'fan01',
+            'range': '1h',
+            'count': 1,
+            'points': [
+              {
+                't': '2026-11-25T12:00:00.000Z',
+                'humidity': 71.0,
+                'temperature': 28.0,
+                'fan_pwm': 60,
+                'smoke': -15,
+                'smoke_alert': true,
+              },
+            ],
+          }),
+          200,
+        );
+      }
+      if (req.url.path == '/api/config') {
+        return http.Response(
+          jsonEncode({
+            'device': 'fan01',
+            'config': {
+              'hum_on': 70,
+              'hum_off': 60,
+              'post_run_sec': 300,
+              'max_pwm': 100,
+              'smoke_on': 250,
+              'smoke_off': 100,
+            },
+            'defaults': {
+              'hum_on': 70,
+              'hum_off': 60,
+              'post_run_sec': 300,
+              'max_pwm': 100,
+              'smoke_on': 250,
+              'smoke_off': 100,
+            },
+          }),
+          200,
+        );
+      }
+      return http.Response('{}', 404);
+    });
+    addTearDown(() => api_http.testHttpClient = null);
+
+    // 1. SchedulesPage
+    expect(await verifyAndActivateAdmin('admin-secret-key'), isTrue);
+    await tester.pumpWidget(const MaterialApp(home: SchedulesPage(isActive: true)));
+    await tester.pumpAndSettle();
+    expect(find.text('Jadwal Rahasia'), findsOneWidget);
+
+    await clearAdminSession();
+    await tester.pumpAndSettle();
+    expect(find.text('Jadwal Rahasia'), findsNothing);
+    expect(find.text('Jadwal memerlukan akses Admin di Pengaturan'), findsOneWidget);
+
+    // 2. StatsPage
+    expect(await verifyAndActivateAdmin('admin-secret-key'), isTrue);
+    await tester.pumpWidget(const MaterialApp(home: StatsPage(isActive: true)));
+    await tester.pumpAndSettle();
+    expect(find.text('71 %'), findsNWidgets(2));
+
+    await clearAdminSession();
+    await tester.pumpAndSettle();
+    expect(find.text('71 %'), findsNothing);
+    expect(find.text('Riwayat memerlukan akses Admin di Pengaturan'), findsNWidgets(2));
+
+    // 3. SettingsPage
+    expect(await verifyAndActivateAdmin('admin-secret-key'), isTrue);
+    await tester.pumpWidget(const MaterialApp(home: SettingsPage(isActive: true)));
+    await tester.pumpAndSettle();
+    final saveBtn = find.text('Simpan pengaturan');
+    await tester.scrollUntilVisible(
+      saveBtn,
+      200,
+      scrollable: find.byType(Scrollable).first,
+    );
+    expect(saveBtn, findsOneWidget);
+
+    final logoutText = find.text('Keluar Mode Admin');
+    await tester.scrollUntilVisible(
+      logoutText,
+      -200,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.ensureVisible(logoutText);
+    await tester.pumpAndSettle();
+    await tester.tap(logoutText);
+    await tester.pumpAndSettle();
+    expect(find.text('Simpan pengaturan'), findsNothing);
+    final authErr = find.text('Pengaturan perangkat memerlukan akses Admin.');
+    await tester.scrollUntilVisible(
+      authErr,
+      200,
+      scrollable: find.byType(Scrollable).first,
+    );
+    expect(authErr, findsOneWidget);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('SettingsPage probe /health tanpa kunci, aktivasi Admin, dan dialog reset dibatalkan saat epoch berubah', (tester) async {
+    const originA = 'https://origin-a.example.com';
+    const originB = 'https://origin-b.example.com';
+    SharedPreferences.setMockInitialValues({'base_url': originA});
+    await initAppConfig(trustedAdminOriginOverride: originA, isDebugMode: false);
+
+    final requests = <http.Request>[];
+    api_http.testHttpClient = MockClient((req) async {
+      requests.add(req);
+      if (req.url.path == '/health') {
+        expect(req.headers.keys.any((k) => k.toLowerCase() == 'x-api-key'), isFalse);
+        return http.Response(jsonEncode({'ok': true}), 200);
+      }
+      if (req.url.path == '/api/admin/verify') {
+        return http.Response(jsonEncode({'ok': true, 'role': 'admin'}), 200);
+      }
+      if (req.url.path == '/api/config') {
+        return http.Response(
+          jsonEncode({
+            'device': 'fan01',
+            'config': {
+              'hum_on': 75,
+              'hum_off': 60,
+              'post_run_sec': 60,
+              'max_pwm': 90,
+              'smoke_on': 250,
+              'smoke_off': 100,
+            },
+            'defaults': {
+              'hum_on': 70,
+              'hum_off': 60,
+              'post_run_sec': 60,
+              'max_pwm': 100,
+              'smoke_on': 250,
+              'smoke_off': 100,
+            },
+          }),
+          200,
+        );
+      }
+      return http.Response('{}', 200);
+    });
+    addTearDown(() => api_http.testHttpClient = null);
+
+    await tester.pumpWidget(const MaterialApp(home: SettingsPage(isActive: true)));
+    await tester.pumpAndSettle();
+
+    // Aktivasi Admin via UI
+    await tester.enterText(
+      find.widgetWithText(TextField, 'Kunci Admin'),
+      'admin-secret-key',
+    );
+    await tester.tap(find.text('Aktifkan Mode Admin'));
+    await tester.pumpAndSettle();
+    expect(isAdminSession, isTrue);
+
+    // Probe alamat B saat sesi Admin A aktif -> /health tidak boleh mengirim X-API-Key
+    final addrField = find.byType(TextField).first;
+    await tester.enterText(addrField, originB);
+    await tester.tap(find.text('Uji koneksi'));
+    await tester.pumpAndSettle();
+    final healthReqs = requests.where((r) => r.url.toString() == '$originB/health').toList();
+    expect(healthReqs.length, 1);
+    expect(healthReqs.first.headers.keys.any((k) => k.toLowerCase() == 'x-api-key'), isFalse);
+
+    // Buka dialog reset lalu cabut sesi sebelum konfirmasi -> tidak mengirim /api/config/reset
+    final resetBtn = find.text('Kembalikan ke bawaan');
+    await tester.scrollUntilVisible(
+      resetBtn,
+      200,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.ensureVisible(resetBtn);
+    await tester.pumpAndSettle();
+    await tester.tap(resetBtn);
+    await tester.pumpAndSettle();
+    await clearAdminSession();
+    await tester.tap(find.text('Kembalikan'));
+    await tester.pumpAndSettle();
+    expect(requests.any((r) => r.url.path == '/api/config/reset'), isFalse);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('Dashboard menampilkan banner alarm asap dengan PWM terpisah saat smokeAlert aktif', (tester) async {
+    const originA = 'https://origin-a.example.com';
+    SharedPreferences.setMockInitialValues({'base_url': originA});
+    await initAppConfig(trustedAdminOriginOverride: originA, isDebugMode: false);
+
+    api_http.testHttpClient = MockClient((req) async {
+      if (req.url.path == '/api/status') {
+        return http.Response(
+          jsonEncode({
+            'device': 'fan01',
+            'online': true,
+            'last_seen_sec_ago': 1,
+            'latest': {
+              'humidity': 60.0,
+              'temperature': 27.0,
+              'fan_pwm': 0,
+              'mode': 'auto',
+              'state': 'ASAP',
+              'power': true,
+              'smoke': 340,
+              'smoke_alert': true,
+              'smoke_ready': true,
+            },
+          }),
+          200,
+        );
+      }
+      return http.Response('{}', 404);
+    });
+    addTearDown(() => api_http.testHttpClient = null);
+
+    await tester.pumpWidget(const MaterialApp(home: DashboardPage(isActive: true)));
+    await tester.pump();
+    await tester.pump();
+    expect(find.text('Alarm asap aktif'), findsOneWidget);
+    expect(find.textContaining('Fan dilaporkan: 0 %'), findsOneWidget);
   });
 }

@@ -118,7 +118,8 @@ class _StatsPageState extends State<StatsPage> {
   void _onSessionChange() {
     if (!mounted) return;
     final nextOrigin = originOf(kBaseUrl);
-    if (nextOrigin != _activeOrigin) {
+    final originChanged = nextOrigin != _activeOrigin;
+    if (originChanged || !isAdminSession) {
       setState(() {
         _activeOrigin = nextOrigin;
         _points = [];
@@ -126,6 +127,8 @@ class _StatsPageState extends State<StatsPage> {
         _error = null;
       });
       if (widget.isActive) _load();
+    } else if (widget.isActive && _points.isEmpty) {
+      _load();
     }
   }
 
@@ -155,7 +158,11 @@ class _StatsPageState extends State<StatsPage> {
         return;
       }
       if (res.statusCode == 401) {
-        setState(() => _error = 'Riwayat memerlukan akses Admin di Pengaturan');
+        setState(() {
+          _points = [];
+          _loaded = false;
+          _error = 'Riwayat memerlukan akses Admin di Pengaturan';
+        });
         return;
       }
       if (res.statusCode != 200) throw Exception('HTTP ${res.statusCode}');
