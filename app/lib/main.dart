@@ -1,34 +1,46 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
-import 'api_http.dart' as http;
 
 import 'air_flow.dart';
+import 'api_http.dart' as http;
 import 'constants.dart';
-import 'stats_page.dart';
+import 'feedback_page.dart';
 import 'schedules_page.dart';
 import 'settings_page.dart';
+import 'stats_page.dart';
 
 class FanStatus {
   final bool online;
   final int lastSeenSec;
+  final bool hasLatest;
   final double? humidity;
   final double? temperature;
   final int? fanPwm;
   final String? mode;
   final String? state;
   final bool power;
+  final int? smoke;
+  final bool smokeAlert;
+  final bool smokeReady;
+  final DateTime? sampleTime;
 
   FanStatus({
     required this.online,
     required this.lastSeenSec,
+    this.hasLatest = true,
     this.humidity,
     this.temperature,
     this.fanPwm,
     this.mode,
     this.state,
     this.power = true,
+    this.smoke,
+    this.smokeAlert = false,
+    this.smokeReady = false,
+    this.sampleTime,
   });
 
   factory FanStatus.fromJson(Map<String, dynamic> j) {
@@ -36,20 +48,125 @@ class FanStatus {
     return FanStatus(
       online: j['online'] == true,
       lastSeenSec: (j['last_seen_sec_ago'] as num?)?.toInt() ?? 0,
+      hasLatest: latest != null,
       humidity: (latest?['humidity'] as num?)?.toDouble(),
       temperature: (latest?['temperature'] as num?)?.toDouble(),
       fanPwm: (latest?['fan_pwm'] as num?)?.toInt(),
       mode: latest?['mode'] as String?,
       state: latest?['state'] as String?,
       power: (latest?['power'] as bool?) ?? true,
+      smoke: (latest?['smoke'] as num?)?.toInt(),
+      smokeAlert: latest?['smoke_alert'] == true,
+      smokeReady: latest?['smoke_ready'] == true,
+      sampleTime: DateTime.tryParse((latest?['time'] as String?) ?? '')?.toLocal(),
     );
   }
 }
 
+enum SmokeUiState { noData, offline, unavailable, warmingUp, alert, normal }
+
+class SmokeUiInfo {
+  final SmokeUiState state;
+  final String title;
+  final String detail;
+  final Color color;
+
+  const SmokeUiInfo({
+    required this.state,
+    required this.title,
+    required this.detail,
+    required this.color,
+  });
+}
+
+String formatAgeShort(int sec) {
+  final clamped = math.max(0, sec);
+  if (clamped < 60) return '$clamped dtk';
+  final mins = clamped ~/ 60;
+  if (mins < 60) return '$mins mnt';
+  return '${mins ~/ 60} jam ${mins % 60} mnt';
+}
+
+int effectiveAgeSec(FanStatus s, DateTime fetchedAt, DateTime now) {
+  final extra = math.max(0, now.difference(fetchedAt).inSeconds);
+  return math.max(0, s.lastSeenSec) + extra;
+}
+
+bool isEffectivelyOnline(
+  FanStatus? s,
+  DateTime? fetchedAt,
+  DateTime now, {
+  bool hasRefreshError = false,
+}) {
+  if (s == null || !s.hasLatest || !s.online || hasRefreshError || fetchedAt == null) {
+    return false;
+  }
+  return effectiveAgeSec(s, fetchedAt, now) < 20;
+}
+
+SmokeUiInfo evaluateSmokeUi(
+  FanStatus? s, {
+  bool? effectiveOnline,
+  int? ageSec,
+}) {
+  if (s == null || !s.hasLatest) {
+    return const SmokeUiInfo(
+      state: SmokeUiState.noData,
+      title: 'Belum ada data',
+      detail: 'Menunggu data sensor pertama dari perangkat.',
+      color: kMuted,
+    );
+  }
+
+  final online = effectiveOnline ?? s.online;
+  if (!online) {
+    final age = ageSec ?? s.lastSeenSec;
+    return SmokeUiInfo(
+      state: SmokeUiState.offline,
+      title: 'Offline',
+      detail: 'Bacaan terakhir ${formatAgeShort(age)} lalu.',
+      color: const Color(0xFFF87171),
+    );
+  }
+
+  if (s.smoke == null) {
+    return const SmokeUiInfo(
+      state: SmokeUiState.unavailable,
+      title: 'Data MQ-2 tidak tersedia',
+      detail: 'Perangkat/data ini tidak menyertakan bacaan sensor asap.',
+      color: kMuted,
+    );
+  }
+
+  if (!s.smokeReady) {
+    return SmokeUiInfo(
+      state: SmokeUiState.warmingUp,
+      title: 'Pemanasan',
+      detail: 'Sensor MQ-2 kalibrasi awal (delta ${s.smoke}).',
+      color: const Color(0xFFFACC15),
+    );
+  }
+
+  if (s.smokeAlert) {
+    return SmokeUiInfo(
+      state: SmokeUiState.alert,
+      title: 'Asap terdeteksi',
+      detail: 'Alarm asap aktif (delta ${s.smoke}) · Fan dilaporkan ${s.fanPwm ?? 0} %',
+      color: const Color(0xFFEF4444),
+    );
+  }
+
+  return SmokeUiInfo(
+    state: SmokeUiState.normal,
+    title: 'Normal',
+    detail: 'Udara bersih (delta ${s.smoke}).',
+    color: const Color(0xFF4ADE80),
+  );
+}
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await loadBaseUrl();
-  await loadApiKey();
+  await initAppConfig();
   runApp(const BathfanApp());
 }
 
@@ -72,7 +189,8 @@ class BathfanApp extends StatelessWidget {
 }
 
 class DashboardPage extends StatefulWidget {
-  const DashboardPage({super.key});
+  final bool isActive;
+  const DashboardPage({super.key, this.isActive = true});
 
   @override
   State<DashboardPage> createState() => _DashboardPageState();
@@ -80,29 +198,72 @@ class DashboardPage extends StatefulWidget {
 
 class _DashboardPageState extends State<DashboardPage> {
   FanStatus? _status;
+  DateTime? _fetchedAt;
   String? _error;
   Timer? _timer;
+  Timer? _pendingModeTimer;
+  Timer? _pendingPowerTimer;
   String? _pendingMode;
   double _manualSpeed = 50;
   bool? _pendingPower;
+  String _activeOrigin = originOf(kBaseUrl);
 
   @override
   void initState() {
     super.initState();
-    _refresh();
-    _timer = Timer.periodic(const Duration(seconds: 3), (_) => _refresh());
+    sessionNotifier.addListener(_onSessionChange);
+    _syncPolling(immediate: widget.isActive);
+  }
+
+  @override
+  void didUpdateWidget(covariant DashboardPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.isActive != widget.isActive) {
+      _syncPolling(immediate: widget.isActive);
+    }
   }
 
   @override
   void dispose() {
+    sessionNotifier.removeListener(_onSessionChange);
     _timer?.cancel();
+    _pendingModeTimer?.cancel();
+    _pendingPowerTimer?.cancel();
     super.dispose();
   }
 
-    Future<bool> _post(String path, Map<String, dynamic> body) async {
+  void _onSessionChange() {
+    if (!mounted) return;
+    final nextOrigin = originOf(kBaseUrl);
+    final originChanged = nextOrigin != _activeOrigin;
+    setState(() {
+      if (originChanged) {
+        _activeOrigin = nextOrigin;
+        _status = null;
+        _fetchedAt = null;
+        _error = null;
+      }
+      _pendingMode = null;
+      _pendingPower = null;
+    });
+    if (originChanged && widget.isActive) {
+      _refresh();
+    }
+  }
+
+  void _syncPolling({required bool immediate}) {
+    _timer?.cancel();
+    _timer = null;
+    if (!widget.isActive) return;
+    if (immediate) _refresh();
+    _timer = Timer.periodic(const Duration(seconds: 3), (_) => _refresh());
+  }
+
+  Future<bool> _postAdmin(String path, Map<String, dynamic> body) async {
+    if (!isAdminSession || kBaseUrl.isEmpty) return false;
     try {
       final res = await http
-          .post(
+          .postAdmin(
             Uri.parse('$kBaseUrl$path'),
             headers: {'Content-Type': 'application/json'},
             body: jsonEncode(body),
@@ -110,7 +271,7 @@ class _DashboardPageState extends State<DashboardPage> {
           .timeout(const Duration(seconds: 5));
       if (res.statusCode != 200) throw Exception('HTTP ${res.statusCode}');
       return true;
-    } catch (e) {
+    } catch (_) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Perintah gagal dikirim')),
@@ -121,76 +282,125 @@ class _DashboardPageState extends State<DashboardPage> {
   }
 
   Future<void> _setMode(String mode) async {
+    if (!isAdminSession) return;
+    final epoch = kSessionEpoch;
+    final origin = originOf(kBaseUrl);
+
     setState(() => _pendingMode = mode);
     if (mode == 'manual') {
       // Mulai dari kecepatan saat ini, supaya fan tidak mendadak berhenti.
       final current = (_status?.fanPwm ?? 0).toDouble();
       setState(() => _manualSpeed = current);
-      await _post('/api/speed', {'pwm': current.round()});
+      final speedOk = await _postAdmin('/api/speed', {'pwm': current.round()});
+      if (!speedOk ||
+          !mounted ||
+          kSessionEpoch != epoch ||
+          !isAdminSession ||
+          originOf(kBaseUrl) != origin) {
+        if (mounted) setState(() => _pendingMode = null);
+        return;
+      }
     }
-    final ok = await _post('/api/mode', {'mode': mode});
+
+    final ok = await _postAdmin('/api/mode', {'mode': mode});
     if (!ok && mounted) {
       setState(() => _pendingMode = null);
       return;
     }
     // Setelah beberapa detik, tampilan kembali mengikuti data dari perangkat.
-    Future.delayed(const Duration(seconds: 8), () {
-      if (mounted) setState(() => _pendingMode = null);
+    _pendingModeTimer?.cancel();
+    _pendingModeTimer = Timer(const Duration(seconds: 8), () {
+      if (mounted && kSessionEpoch == epoch) {
+        setState(() => _pendingMode = null);
+      }
     });
   }
 
-    Future<void> _setPower(bool on) async {
+  Future<void> _setPower(bool on) async {
+    if (!isAdminSession) return;
+    final epoch = kSessionEpoch;
     setState(() => _pendingPower = on);
-    final ok = await _post('/api/power', {'on': on});
+    final ok = await _postAdmin('/api/power', {'on': on});
     if (!ok && mounted) {
       setState(() => _pendingPower = null);
       return;
     }
-    // Setelah beberapa detik, tampilan kembali mengikuti data dari perangkat.
-    Future.delayed(const Duration(seconds: 8), () {
-      if (mounted) setState(() => _pendingPower = null);
+    _pendingPowerTimer?.cancel();
+    _pendingPowerTimer = Timer(const Duration(seconds: 8), () {
+      if (mounted && kSessionEpoch == epoch) {
+        setState(() => _pendingPower = null);
+      }
     });
   }
 
   Future<void> _sendSpeed(double v) async {
-    await _post('/api/speed', {'pwm': v.round()});
+    if (!isAdminSession) return;
+    await _postAdmin('/api/speed', {'pwm': v.round()});
   }
 
   Future<void> _refresh() async {
+    if (kBaseUrl.isEmpty) {
+      if (mounted) {
+        setState(() => _error = 'Alamat server belum diatur di Pengaturan.');
+      }
+      return;
+    }
+    final epoch = kSessionEpoch;
+    final origin = originOf(kBaseUrl);
     try {
       final res = await http
-          .get(Uri.parse('$kBaseUrl/api/status'))
+          .getForSession(Uri.parse('$kBaseUrl/api/status'))
           .timeout(const Duration(seconds: 5));
 
+      if (!mounted || epoch != kSessionEpoch || origin != originOf(kBaseUrl)) {
+        return;
+      }
+
       if (res.statusCode == 401) {
-        if (!mounted) return;
-        setState(() => _error = 'Kunci API salah atau belum diisi. Isi di tab Pengaturan.');
+        setState(() => _error = 'Server membutuhkan kunci Admin di tab Pengaturan.');
         return;
       }
 
       if (res.statusCode != 200) throw Exception('HTTP ${res.statusCode}');
       final data = jsonDecode(res.body) as Map<String, dynamic>;
-      if (!mounted) return;
+      if (!mounted || epoch != kSessionEpoch || origin != originOf(kBaseUrl)) {
+        return;
+      }
       setState(() {
         _status = FanStatus.fromJson(data);
+        _fetchedAt = DateTime.now();
         _error = null;
       });
-    } catch (e, st) {
-      debugPrint('REFRESH ERROR: $e');
-      debugPrint('$st');
-      if (!mounted) return;
-      setState(() => _error = 'Gagal: $e');
+    } catch (e) {
+      if (!mounted || epoch != kSessionEpoch || origin != originOf(kBaseUrl)) {
+        return;
+      }
+      setState(() => _error = 'Gagal memperbarui data ($e)');
     }
   }
 
   @override
   Widget build(BuildContext context) {
     final s = _status;
+    final now = DateTime.now();
+    final online = isEffectivelyOnline(
+      s,
+      _fetchedAt,
+      now,
+      hasRefreshError: _error != null,
+    );
+    final ageSec = (s != null && _fetchedAt != null)
+        ? effectiveAgeSec(s, _fetchedAt!, now)
+        : (s?.lastSeenSec ?? 0);
+    final smokeUi = evaluateSmokeUi(s, effectiveOnline: online, ageSec: ageSec);
+
     final h = s?.humidity;
     final color = h == null ? kAccent : humidityColor(h);
     final mode = _pendingMode ?? s?.mode ?? 'auto';
     final power = _pendingPower ?? s?.power ?? true;
-    final standby = power && s?.state == 'STANDBY';
+    final standby = online && power && s?.state == 'STANDBY';
+    final showSmokeBanner = s != null && s.hasLatest && online && s.smokeAlert;
+    final admin = isAdminSession;
 
     return Scaffold(
       body: SafeArea(
@@ -198,7 +408,7 @@ class _DashboardPageState extends State<DashboardPage> {
           padding: const EdgeInsets.fromLTRB(20, 16, 20, 20),
           child: ListView(
             children: [
-                            Row(
+              Row(
                 children: [
                   Expanded(
                     child: Column(
@@ -212,40 +422,75 @@ class _DashboardPageState extends State<DashboardPage> {
                           ),
                         ),
                         const SizedBox(height: 4),
-                        _subtitle(s),
+                        _subtitle(s, online, ageSec),
                       ],
                     ),
                   ),
-                  _powerButton(power),
+                  _powerButton(power, enabled: admin),
                 ],
               ),
+              const SizedBox(height: 10),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: admin
+                        ? kAccent.withValues(alpha: 0.16)
+                        : kCard,
+                    borderRadius: BorderRadius.circular(999),
+                    border: Border.all(
+                      color: admin ? kAccent.withValues(alpha: 0.5) : kLine,
+                    ),
+                  ),
+                  child: Text(
+                    admin ? 'Mode Admin (Kendali Aktif)' : 'Mode Pengunjung (Lihat Saja)',
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                      color: admin ? kAccent : kMuted,
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 14),
+              _hero(s, power ? color : const Color(0xFF4B5F7F), online),
               const SizedBox(height: 16),
-              _hero(s, power ? color : const Color(0xFF4B5F7F)),
-              const SizedBox(height: 16),
+              if (showSmokeBanner) ...[
+                _smokeBanner(s),
+                const SizedBox(height: 16),
+              ],
               if (standby) ...[
                 _standbyBanner(),
                 const SizedBox(height: 16),
               ],
+              _smokeCard(smokeUi, s),
+              const SizedBox(height: 12),
               Row(
                 children: [
                   Expanded(child: _fanCard(s)),
                   const SizedBox(width: 12),
-                  Expanded(child: _infoCard(s)),
+                  Expanded(child: _infoCard(s, ageSec)),
                 ],
               ),
               const SizedBox(height: 16),
-              _modeSelector(mode),
+              IgnorePointer(
+                ignoring: !admin,
+                child: Opacity(
+                  opacity: admin ? 1 : 0.5,
+                  child: _modeSelector(mode, enabled: admin),
+                ),
+              ),
               if (mode == 'manual') ...[
                 const SizedBox(height: 16),
                 IgnorePointer(
-                  ignoring: standby,
+                  ignoring: !admin || standby,
                   child: Opacity(
-                  opacity: standby ? 0.4 : 1,
-                  child: _speedCard(),
+                    opacity: (!admin || standby) ? 0.4 : 1,
+                    child: _speedCard(enabled: admin && !standby),
                   ),
                 ),
               ],
-
               if (_error != null)
                 Padding(
                   padding: const EdgeInsets.only(top: 16),
@@ -261,12 +506,12 @@ class _DashboardPageState extends State<DashboardPage> {
     );
   }
 
-    Widget _modeSelector(String mode) {
+  Widget _modeSelector(String mode, {required bool enabled}) {
     Widget item(String value, String label) {
       final active = mode == value;
       return Expanded(
         child: GestureDetector(
-          onTap: () => _setMode(value),
+          onTap: enabled ? () => _setMode(value) : null,
           child: Container(
             padding: const EdgeInsets.symmetric(vertical: 14),
             alignment: Alignment.center,
@@ -301,7 +546,7 @@ class _DashboardPageState extends State<DashboardPage> {
     );
   }
 
-  Widget _speedCard() {
+  Widget _speedCard({required bool enabled}) {
     return _card(
       Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -325,66 +570,157 @@ class _DashboardPageState extends State<DashboardPage> {
             min: 0,
             max: 100,
             divisions: 20,
-            onChanged: (v) => setState(() => _manualSpeed = v),
-            onChangeEnd: _sendSpeed,
+            onChanged: enabled ? (v) => setState(() => _manualSpeed = v) : null,
+            onChangeEnd: enabled ? _sendSpeed : null,
           ),
         ],
       ),
     );
   }
 
-    Widget _powerButton(bool on) {
+  Widget _powerButton(bool on, {required bool enabled}) {
     const dark = Color(0xFF08213F);
     return Semantics(
       button: true,
+      enabled: enabled,
       label: on ? 'Matikan fan' : 'Nyalakan fan',
       child: GestureDetector(
-        onTap: () => _setPower(!on),
-        child: Container(
-          height: 44,
-          padding: const EdgeInsets.fromLTRB(16, 6, 6, 6),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(999),
-            color: on ? null : kCard,
-            gradient: on
-                ? const LinearGradient(
-                    colors: [Color(0xFF6FA8FF), Color(0xFFA9CDFF)],
-                  )
-                : null,
-            border: Border.all(color: kLine),
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                on ? 'On' : 'Off',
-                style: TextStyle(
-                  fontWeight: FontWeight.w700,
-                  color: on ? dark : kMuted,
+        onTap: enabled ? () => _setPower(!on) : null,
+        child: Opacity(
+          opacity: enabled ? 1 : 0.55,
+          child: Container(
+            height: 44,
+            padding: const EdgeInsets.fromLTRB(16, 6, 6, 6),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(999),
+              color: on ? null : kCard,
+              gradient: on
+                  ? const LinearGradient(
+                      colors: [Color(0xFF6FA8FF), Color(0xFFA9CDFF)],
+                    )
+                  : null,
+              border: Border.all(color: kLine),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  on ? 'On' : 'Off',
+                  style: TextStyle(
+                    fontWeight: FontWeight.w700,
+                    color: on ? dark : kMuted,
+                  ),
                 ),
-              ),
-              const SizedBox(width: 10),
-              Container(
-                width: 32,
-                height: 32,
-                decoration: BoxDecoration(
-                  color: on ? Colors.white : kLine,
-                  shape: BoxShape.circle,
+                const SizedBox(width: 10),
+                Container(
+                  width: 32,
+                  height: 32,
+                  decoration: BoxDecoration(
+                    color: on ? Colors.white : kLine,
+                    shape: BoxShape.circle,
+                  ),
+                  child: Icon(
+                    Icons.power_settings_new,
+                    size: 18,
+                    color: on ? dark : kMuted,
+                  ),
                 ),
-                child: Icon(
-                  Icons.power_settings_new,
-                  size: 18,
-                  color: on ? dark : kMuted,
-                ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),
     );
   }
 
-    Widget _standbyBanner() {
+  Widget _smokeBanner(FanStatus s) {
+    const color = Color(0xFFEF4444);
+    final deltaText = s.smoke == null ? '--' : '${s.smoke}';
+    final pwmText = s.fanPwm == null ? '--' : '${s.fanPwm} %';
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: color.withValues(alpha: 0.7)),
+        color: color.withValues(alpha: 0.14),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Icon(Icons.warning_amber_rounded, color: color),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Alarm asap aktif',
+                  style: TextStyle(fontWeight: FontWeight.w700, fontSize: 15),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  'Sensor MQ-2 mendeteksi asap (delta $deltaText). '
+                  'Daya: ${s.power ? 'ON' : 'OFF'} · Fan dilaporkan: $pwmText.',
+                  style: const TextStyle(fontSize: 13, color: Color(0xFFFCA5A5)),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _smokeCard(SmokeUiInfo info, FanStatus? s) {
+    final timeStr = s?.sampleTime == null
+        ? null
+        : '${s!.sampleTime!.hour.toString().padLeft(2, '0')}:'
+            '${s.sampleTime!.minute.toString().padLeft(2, '0')}:'
+            '${s.sampleTime!.second.toString().padLeft(2, '0')}';
+
+    return _card(
+      Row(
+        children: [
+          Container(
+            width: 12,
+            height: 12,
+            decoration: BoxDecoration(color: info.color, shape: BoxShape.circle),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    const Text('Sensor Asap (MQ-2)', style: TextStyle(fontSize: 13, color: kMuted)),
+                    Text(
+                      info.title,
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w700,
+                        color: info.color,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  timeStr != null && info.state == SmokeUiState.offline
+                      ? '${info.detail} (pukul $timeStr)'
+                      : info.detail,
+                  style: const TextStyle(fontSize: 13),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _standbyBanner() {
     const color = Color(0xFFA9B8FF);
     return Container(
       padding: const EdgeInsets.all(14),
@@ -393,9 +729,9 @@ class _DashboardPageState extends State<DashboardPage> {
         border: Border.all(color: color.withValues(alpha: 0.6)),
         color: color.withValues(alpha: 0.12),
       ),
-      child: Row(
+      child: const Row(
         crossAxisAlignment: CrossAxisAlignment.start,
-        children: const [
+        children: [
           Icon(Icons.bedtime_outlined, color: color),
           SizedBox(width: 12),
           Expanded(
@@ -419,17 +755,24 @@ class _DashboardPageState extends State<DashboardPage> {
     );
   }
 
-  Widget _subtitle(FanStatus? s) {
-    final online = s?.online ?? false;
+  Widget _subtitle(FanStatus? s, bool online, int ageSec) {
+    final statusText = s == null || !s.hasLatest
+        ? '● Menunggu data'
+        : (online
+            ? '● Online'
+            : '● Offline (${formatAgeShort(ageSec)} lalu)');
+    final statusColor = s == null || !s.hasLatest
+        ? kMuted
+        : (online ? const Color(0xFF4ADE80) : const Color(0xFFF87171));
     return Text.rich(
       TextSpan(
         style: const TextStyle(fontSize: 13, color: kMuted),
         children: [
           const TextSpan(text: 'fan01 · '),
           TextSpan(
-            text: online ? '● Online' : '● Offline',
+            text: statusText,
             style: TextStyle(
-              color: online ? const Color(0xFF4ADE80) : const Color(0xFFF87171),
+              color: statusColor,
               fontWeight: FontWeight.w600,
             ),
           ),
@@ -438,12 +781,18 @@ class _DashboardPageState extends State<DashboardPage> {
     );
   }
 
-  Widget _hero(FanStatus? s, Color color) {
+  Widget _hero(FanStatus? s, Color color, bool online) {
     final h = s?.humidity;
     final number = h == null ? '--' : h.toStringAsFixed(1).replaceAll('.', ',');
+    final subLabel = h == null
+        ? 'Menunggu data...'
+        : (online
+            ? 'Kelembapan ${humidityLabel(h)}'
+            : 'Kelembapan ${humidityLabel(h)} (bacaan terakhir)');
+
     return Container(
       width: double.infinity,
-      height: 300,
+      height: 290,
       clipBehavior: Clip.antiAlias,
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(28),
@@ -456,8 +805,11 @@ class _DashboardPageState extends State<DashboardPage> {
       ),
       child: Stack(
         children: [
-                    Positioned.fill(
-            child: AirFlow(color: color, speed: (s?.fanPwm ?? 0) / 100),
+          Positioned.fill(
+            child: AirFlow(
+              color: color,
+              speed: online ? ((s?.fanPwm ?? 0) / 100) : 0,
+            ),
           ),
           const Positioned(
             top: 20,
@@ -477,7 +829,7 @@ class _DashboardPageState extends State<DashboardPage> {
                 borderRadius: BorderRadius.circular(999),
               ),
               child: Text(
-                s?.state ?? '--',
+                online ? (s?.state ?? '--') : (s?.hasLatest == true ? 'OFFLINE' : '--'),
                 style: const TextStyle(
                   fontSize: 12,
                   fontWeight: FontWeight.w700,
@@ -503,7 +855,7 @@ class _DashboardPageState extends State<DashboardPage> {
                 ),
                 const SizedBox(height: 10),
                 Text(
-                  h == null ? 'Menunggu data...' : 'Kelembapan ${humidityLabel(h)}',
+                  subLabel,
                   style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
                 ),
                 const SizedBox(height: 4),
@@ -568,9 +920,9 @@ class _DashboardPageState extends State<DashboardPage> {
     );
   }
 
-  Widget _infoCard(FanStatus? s) {
+  Widget _infoCard(FanStatus? s, int ageSec) {
     final mode = s?.mode;
-    final modeText = mode == null
+    final modeText = mode == null || mode.isEmpty
         ? '--'
         : mode[0].toUpperCase() + mode.substring(1);
     return _card(
@@ -589,7 +941,7 @@ class _DashboardPageState extends State<DashboardPage> {
           ),
           const SizedBox(height: 10),
           Text(
-            s == null ? '' : 'Data ${s.lastSeenSec} dtk lalu',
+            s == null || !s.hasLatest ? '' : 'Data ${formatAgeShort(ageSec)} lalu',
             style: const TextStyle(fontSize: 13, color: kMuted),
           ),
         ],
@@ -598,9 +950,6 @@ class _DashboardPageState extends State<DashboardPage> {
   }
 }
 
-
-// navbar
-
 class HomeShell extends StatefulWidget {
   const HomeShell({super.key});
 
@@ -608,19 +957,41 @@ class HomeShell extends StatefulWidget {
   State<HomeShell> createState() => _HomeShellState();
 }
 
-class _HomeShellState extends State<HomeShell> {
+class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   int _index = 0;
+  bool _foreground = true;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    final next = state == AppLifecycleState.resumed;
+    if (next != _foreground && mounted) {
+      setState(() => _foreground = next);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       body: IndexedStack(
         index: _index,
-        children: const [
-          DashboardPage(),
-          StatsPage(),
-          SchedulesPage(),
-          SettingsPage(),
+        children: [
+          DashboardPage(isActive: _foreground && _index == 0),
+          StatsPage(isActive: _foreground && _index == 1),
+          SchedulesPage(isActive: _foreground && _index == 2),
+          const FeedbackPage(),
+          SettingsPage(isActive: _foreground && _index == 4),
         ],
       ),
       bottomNavigationBar: NavigationBar(
@@ -636,32 +1007,13 @@ class _HomeShellState extends State<HomeShell> {
           ),
           NavigationDestination(icon: Icon(Icons.show_chart), label: 'Statistik'),
           NavigationDestination(icon: Icon(Icons.schedule), label: 'Jadwal'),
+          NavigationDestination(icon: Icon(Icons.feedback_outlined), label: 'Masukan'),
           NavigationDestination(
             icon: Icon(Icons.settings_outlined),
             selectedIcon: Icon(Icons.settings),
             label: 'Pengaturan',
           ),
         ],
-      ),
-    );
-  }
-}
-
-class _ComingSoon extends StatelessWidget {
-  final String title;
-  const _ComingSoon(this.title);
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      body: SafeArea(
-        child: Center(
-          child: Text(
-            '$title\n(segera hadir)',
-            textAlign: TextAlign.center,
-            style: const TextStyle(color: kMuted, fontSize: 16),
-          ),
-        ),
       ),
     );
   }

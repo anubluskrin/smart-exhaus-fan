@@ -2,8 +2,8 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
-import 'api_http.dart' as http;
 
+import 'api_http.dart' as http;
 import 'constants.dart';
 import 'schedule_form.dart';
 
@@ -53,7 +53,8 @@ String daysText(List<int> d) {
 }
 
 class SchedulesPage extends StatefulWidget {
-  const SchedulesPage({super.key});
+  final bool isActive;
+  const SchedulesPage({super.key, this.isActive = true});
 
   @override
   State<SchedulesPage> createState() => _SchedulesPageState();
@@ -63,18 +64,51 @@ class _SchedulesPageState extends State<SchedulesPage> {
   List<Schedule>? _items;
   String? _error;
   Timer? _timer;
+  String _activeOrigin = originOf(kBaseUrl);
 
   @override
   void initState() {
     super.initState();
-    _load();
-    _timer = Timer.periodic(const Duration(seconds: 20), (_) => _load());
+    sessionNotifier.addListener(_onSessionChange);
+    _syncPolling(immediate: widget.isActive);
+  }
+
+  @override
+  void didUpdateWidget(covariant SchedulesPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.isActive != widget.isActive) {
+      _syncPolling(immediate: widget.isActive);
+    }
   }
 
   @override
   void dispose() {
+    sessionNotifier.removeListener(_onSessionChange);
     _timer?.cancel();
     super.dispose();
+  }
+
+  void _onSessionChange() {
+    if (!mounted) return;
+    final nextOrigin = originOf(kBaseUrl);
+    if (nextOrigin != _activeOrigin) {
+      setState(() {
+        _activeOrigin = nextOrigin;
+        _items = null;
+        _error = null;
+      });
+      if (widget.isActive) _load();
+    } else {
+      setState(() {});
+    }
+  }
+
+  void _syncPolling({required bool immediate}) {
+    _timer?.cancel();
+    _timer = null;
+    if (!widget.isActive) return;
+    if (immediate) _load();
+    _timer = Timer.periodic(const Duration(seconds: 20), (_) => _load());
   }
 
   void _snack(String msg) {
@@ -83,22 +117,33 @@ class _SchedulesPageState extends State<SchedulesPage> {
   }
 
   Future<void> _load() async {
+    if (kBaseUrl.isEmpty) {
+      if (mounted) setState(() => _error = 'Alamat server belum diatur');
+      return;
+    }
+    final epoch = kSessionEpoch;
+    final origin = originOf(kBaseUrl);
     try {
       final res = await http
-          .get(Uri.parse('$kBaseUrl/api/schedules'))
+          .getForSession(Uri.parse('$kBaseUrl/api/schedules'))
           .timeout(const Duration(seconds: 8));
+      if (!mounted || epoch != kSessionEpoch || origin != originOf(kBaseUrl)) return;
+      if (res.statusCode == 401) {
+        setState(() => _error = 'Jadwal memerlukan akses Admin di Pengaturan');
+        return;
+      }
       if (res.statusCode != 200) throw Exception('HTTP ${res.statusCode}');
       final data = jsonDecode(res.body) as Map<String, dynamic>;
       final list = (data['schedules'] as List)
           .map((e) => Schedule.fromJson(e as Map<String, dynamic>))
           .toList();
-      if (!mounted) return;
+      if (!mounted || epoch != kSessionEpoch || origin != originOf(kBaseUrl)) return;
       setState(() {
         _items = list;
         _error = null;
       });
-    } catch (e) {
-      if (!mounted) return;
+    } catch (_) {
+      if (!mounted || epoch != kSessionEpoch || origin != originOf(kBaseUrl)) return;
       setState(() => _error = 'Tidak bisa mengambil jadwal');
     }
   }
@@ -111,23 +156,34 @@ class _SchedulesPageState extends State<SchedulesPage> {
   }
 
   Future<void> _toggle(Schedule s, bool value) async {
+    if (!isAdminSession) return;
+    final epoch = kSessionEpoch;
+    final origin = originOf(kBaseUrl);
+
     _replace(s.copyWith(enabled: value));
     try {
       final res = await http
-          .put(
+          .putAdmin(
             Uri.parse('$kBaseUrl/api/schedules/${s.id}'),
             headers: {'Content-Type': 'application/json'},
             body: jsonEncode({'enabled': value}),
           )
           .timeout(const Duration(seconds: 8));
+      if (!mounted || epoch != kSessionEpoch || origin != originOf(kBaseUrl)) return;
       if (res.statusCode != 200) throw Exception('HTTP ${res.statusCode}');
     } catch (_) {
-      _replace(s);
+      if (epoch == kSessionEpoch && origin == originOf(kBaseUrl)) {
+        _replace(s);
+      }
       _snack('Gagal mengubah jadwal');
     }
   }
 
   Future<void> _delete(Schedule s) async {
+    if (!isAdminSession) return;
+    final epoch = kSessionEpoch;
+    final origin = originOf(kBaseUrl);
+
     final ok = await showDialog<bool>(
       context: context,
       builder: (c) => AlertDialog(
@@ -145,10 +201,17 @@ class _SchedulesPageState extends State<SchedulesPage> {
         ],
       ),
     );
-    if (ok != true || !mounted) return;
+    if (ok != true ||
+        !mounted ||
+        epoch != kSessionEpoch ||
+        !isAdminSession ||
+        origin != originOf(kBaseUrl)) {
+      return;
+    }
+
     try {
       final res = await http
-          .delete(Uri.parse('$kBaseUrl/api/schedules/${s.id}'))
+          .deleteAdmin(Uri.parse('$kBaseUrl/api/schedules/${s.id}'))
           .timeout(const Duration(seconds: 8));
       if (res.statusCode != 200) throw Exception('HTTP ${res.statusCode}');
       await _load();
@@ -157,7 +220,11 @@ class _SchedulesPageState extends State<SchedulesPage> {
     }
   }
 
-    Future<void> _openForm([Schedule? s]) async {
+  Future<void> _openForm([Schedule? s]) async {
+    if (!isAdminSession) return;
+    final epoch = kSessionEpoch;
+    final origin = originOf(kBaseUrl);
+
     final result = await Navigator.of(context).push<Map<String, dynamic>>(
       MaterialPageRoute(
         builder: (_) => ScheduleFormPage(
@@ -170,6 +237,11 @@ class _SchedulesPageState extends State<SchedulesPage> {
       ),
     );
     if (result == null || !mounted) return;
+    if (epoch != kSessionEpoch || !isAdminSession || origin != originOf(kBaseUrl)) {
+      _snack('Sesi berubah, penyimpanan dibatalkan');
+      return;
+    }
+
     try {
       final uri = s == null
           ? Uri.parse('$kBaseUrl/api/schedules')
@@ -177,8 +249,8 @@ class _SchedulesPageState extends State<SchedulesPage> {
       final headers = {'Content-Type': 'application/json'};
       final body = jsonEncode(result);
       final res = await (s == null
-              ? http.post(uri, headers: headers, body: body)
-              : http.put(uri, headers: headers, body: body))
+              ? http.postAdmin(uri, headers: headers, body: body)
+              : http.putAdmin(uri, headers: headers, body: body))
           .timeout(const Duration(seconds: 8));
       if (res.statusCode != 200 && res.statusCode != 201) {
         throw Exception('HTTP ${res.statusCode}');
@@ -189,7 +261,7 @@ class _SchedulesPageState extends State<SchedulesPage> {
     }
   }
 
-  Widget _item(Schedule s) {
+  Widget _item(Schedule s, bool admin) {
     return Container(
       padding: const EdgeInsets.fromLTRB(16, 12, 8, 12),
       decoration: BoxDecoration(
@@ -229,22 +301,24 @@ class _SchedulesPageState extends State<SchedulesPage> {
           ),
           Switch(
             value: s.enabled,
-            onChanged: (v) => _toggle(s, v),
+            onChanged: admin ? (v) => _toggle(s, v) : null,
             activeTrackColor: kAccent,
             activeThumbColor: Colors.white,
             inactiveTrackColor: kLine,
             inactiveThumbColor: kMuted,
           ),
-          IconButton(
-            tooltip: 'Ubah jadwal',
-            onPressed: () => _openForm(s),
-            icon: const Icon(Icons.edit_outlined, color: kMuted),
-          ),
-          IconButton(
-            tooltip: 'Hapus jadwal',
-            onPressed: () => _delete(s),
-            icon: const Icon(Icons.delete_outline, color: kMuted),
-          ),
+          if (admin) ...[
+            IconButton(
+              tooltip: 'Ubah jadwal',
+              onPressed: () => _openForm(s),
+              icon: const Icon(Icons.edit_outlined, color: kMuted),
+            ),
+            IconButton(
+              tooltip: 'Hapus jadwal',
+              onPressed: () => _delete(s),
+              icon: const Icon(Icons.delete_outline, color: kMuted),
+            ),
+          ],
         ],
       ),
     );
@@ -252,6 +326,7 @@ class _SchedulesPageState extends State<SchedulesPage> {
 
   @override
   Widget build(BuildContext context) {
+    final admin = isAdminSession;
     final items = _items;
     final children = <Widget>[
       const Text(
@@ -263,6 +338,12 @@ class _SchedulesPageState extends State<SchedulesPage> {
         'Saat Standby, fan tidak menyala otomatis kecuali kelembapan mencapai 90 %.',
         style: TextStyle(fontSize: 13, color: kMuted),
       ),
+      const SizedBox(height: 10),
+      if (!admin)
+        const Text(
+          'Mode Pengunjung: daftar jadwal hanya dapat dilihat.',
+          style: TextStyle(fontSize: 12, color: kMuted),
+        ),
       const SizedBox(height: 16),
     ];
 
@@ -289,26 +370,28 @@ class _SchedulesPageState extends State<SchedulesPage> {
       );
     } else {
       for (final s in items) {
-        children.add(_item(s));
+        children.add(_item(s, admin));
         children.add(const SizedBox(height: 12));
       }
     }
 
-        children.add(
-      OutlinedButton.icon(
-        onPressed: () => _openForm(),
-        icon: const Icon(Icons.add),
-        label: const Text('Tambah jadwal'),
-        style: OutlinedButton.styleFrom(
-          foregroundColor: kAccent,
-          side: const BorderSide(color: kAccent, width: 2),
-          minimumSize: const Size.fromHeight(52),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(14),
+    if (admin) {
+      children.add(
+        OutlinedButton.icon(
+          onPressed: () => _openForm(),
+          icon: const Icon(Icons.add),
+          label: const Text('Tambah jadwal'),
+          style: OutlinedButton.styleFrom(
+            foregroundColor: kAccent,
+            side: const BorderSide(color: kAccent, width: 2),
+            minimumSize: const Size.fromHeight(52),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(14),
+            ),
           ),
         ),
-      ),
-    );
+      );
+    }
 
     return Scaffold(
       body: SafeArea(

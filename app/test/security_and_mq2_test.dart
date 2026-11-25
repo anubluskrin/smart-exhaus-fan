@@ -3,46 +3,61 @@ import 'dart:convert';
 
 import 'package:bathfan_app/api_http.dart' as api_http;
 import 'package:bathfan_app/constants.dart';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:bathfan_app/feedback_page.dart';
+import 'package:bathfan_app/main.dart';
+import 'package:bathfan_app/schedules_page.dart';
+import 'package:bathfan_app/stats_page.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+class _MemorySecureKvStorage implements SecureKvStorage {
+  final Map<String, String> data = {};
+
+  @override
+  Future<String?> read(String key) async => data[key];
+
+  @override
+  Future<void> write(String key, String value) async => data[key] = value;
+
+  @override
+  Future<void> delete(String key) async => data.remove(key);
+}
+
 void main() {
+  late _MemorySecureKvStorage secureStore;
+
   setUp(() async {
     SharedPreferences.setMockInitialValues({});
-    FlutterSecureStorage.setMockInitialValues({});
-    resetConfigForTest();
+    secureStore = _MemorySecureKvStorage();
+    api_http.testHttpClient = null;
+    resetConfigForTest(secureStorage: secureStore);
   });
 
   test('normalizeBaseUrl menolak HTTP publik, HTTP di release, prefix palsu, dan komponen URL terlarang', () {
-    // Release menolak semua HTTP termasuk localhost & LAN
     expect(normalizeBaseUrl('http://example.com', isDebugMode: false), isNull);
     expect(normalizeBaseUrl('http://localhost:3000', isDebugMode: false), isNull);
     expect(normalizeBaseUrl('http://127.0.0.1:3000', isDebugMode: false), isNull);
     expect(normalizeBaseUrl('http://192.168.1.8:3000', isDebugMode: false), isNull);
     expect(normalizeBaseUrl('http://10.0.2.2:3000', isDebugMode: false), isNull);
 
-    // Debug menolak HTTP publik dan domain publik berawalan 192.168.
     expect(normalizeBaseUrl('http://example.com', isDebugMode: true), isNull);
     expect(normalizeBaseUrl('http://192.168.evil.com:3000', isDebugMode: true), isNull);
     expect(normalizeBaseUrl('http://127.0.0.1.evil.com:3000', isDebugMode: true), isNull);
     expect(normalizeBaseUrl('http://172.32.0.1:3000', isDebugMode: true), isNull);
 
-    // Debug mengizinkan HTTP privat / loopback (termasuk adb reverse localhost)
     expect(normalizeBaseUrl('http://localhost:3000', isDebugMode: true), 'http://localhost:3000');
     expect(normalizeBaseUrl('http://127.0.0.1:3000', isDebugMode: true), 'http://127.0.0.1:3000');
     expect(normalizeBaseUrl('http://10.0.2.2:3000', isDebugMode: true), 'http://10.0.2.2:3000');
     expect(normalizeBaseUrl('192.168.1.8', isDebugMode: true), 'http://192.168.1.8:3000');
     expect(normalizeBaseUrl('http://172.16.5.2:3000', isDebugMode: true), 'http://172.16.5.2:3000');
 
-    // Domain publik tanpa skema -> HTTPS tanpa :3000
     expect(normalizeBaseUrl('api.example.com', isDebugMode: false), 'https://api.example.com');
     expect(normalizeBaseUrl('https://api.example.com:443/', isDebugMode: false), 'https://api.example.com');
     expect(normalizeBaseUrl('https://api.example.com:8443/', isDebugMode: false), 'https://api.example.com:8443');
 
-    // Tolak userinfo, query, fragmen, path selain '/'
     expect(normalizeBaseUrl('https://user:pass@api.example.com', isDebugMode: false), isNull);
     expect(normalizeBaseUrl('https://api.example.com?x=1', isDebugMode: false), isNull);
     expect(normalizeBaseUrl('https://api.example.com#frag', isDebugMode: false), isNull);
@@ -90,7 +105,6 @@ void main() {
     expect(verified, isTrue);
     expect(isAdminSession, isTrue);
 
-    // 1. getPublic ke origin B tidak boleh membawa X-API-Key bahkan bila caller menyertakannya
     await api_http.getPublic(
       Uri.parse('$originB/health'),
       headers: {'x-api-key': 'leaked', 'X-API-KEY': 'leaked-upper', 'Accept': 'application/json'},
@@ -99,7 +113,6 @@ void main() {
     final probeReq = recorded.last;
     expect(probeReq.headers.keys.any((k) => k.toLowerCase() == 'x-api-key'), isFalse);
 
-    // 2. postAdmin ke origin B ditolak sebelum menyentuh jaringan
     final beforeCount = recorded.length;
     await expectLater(
       () => api_http.postAdmin(
@@ -111,7 +124,6 @@ void main() {
     );
     expect(recorded.length, beforeCount);
 
-    // 3. Pindah alamat ke origin B menghapus sesi Admin dan menaikkan epoch
     final epochBefore = kSessionEpoch;
     await setServerAddress(originB, isDebugMode: false);
     expect(kSessionEpoch, greaterThan(epochBefore));
@@ -123,7 +135,6 @@ void main() {
     const originA = 'https://origin-a.example.com';
     const originB = 'https://origin-b.example.com';
 
-    // 1. Saat origin B aktif, verifyAndActivateAdmin mengirim 0 request
     SharedPreferences.setMockInitialValues({'base_url': originB});
     await initAppConfig(trustedAdminOriginOverride: originA, isDebugMode: false);
     int hits = 0;
@@ -134,7 +145,6 @@ void main() {
     expect(await verifyAndActivateAdmin('secret', client: zeroClient), isFalse);
     expect(hits, 0);
 
-    // 2. Redirect 302 pada verify atau mutasi tidak diikuti dan dianggap gagal
     await setServerAddress(originA, isDebugMode: false);
     final redirectClient = MockClient((req) async {
       expect(req.followRedirects, isFalse);
@@ -143,7 +153,6 @@ void main() {
     expect(await verifyAndActivateAdmin('secret', client: redirectClient), isFalse);
     expect(isAdminSession, isFalse);
 
-    // 3. Logout / pindah origin saat verify masih tertunda tetap Guest sesudah respons tiba & sesudah restart
     final completer = Completer<http.Response>();
     final slowClient = MockClient((req) => completer.future);
     final pendingVerify = verifyAndActivateAdmin('secret', client: slowClient);
@@ -154,10 +163,368 @@ void main() {
     expect(await pendingVerify, isFalse);
     expect(isAdminSession, isFalse);
 
-    // Simulasi restart aplikasi kembali ke origin A: kunci tidak boleh tersimpan
-    resetConfigForTest();
+    resetConfigForTest(secureStorage: secureStore);
     SharedPreferences.setMockInitialValues({'base_url': originA});
     await initAppConfig(trustedAdminOriginOverride: originA, isDebugMode: false);
     expect(isAdminSession, isFalse);
+    expect(secureStore.data, isEmpty);
+  });
+
+  test('evaluateSmokeUi membedakan data kosong, offline, perangkat lama tanpa MQ-2, pemanasan, alarm, dan normal', () {
+    final noData = evaluateSmokeUi(
+      FanStatus(online: false, lastSeenSec: 0, hasLatest: false),
+    );
+    expect(noData.state, SmokeUiState.noData);
+
+    final offlineNormal = evaluateSmokeUi(
+      FanStatus(
+        online: false,
+        lastSeenSec: 45,
+        hasLatest: true,
+        humidity: 55,
+        smoke: 10,
+        smokeReady: true,
+        smokeAlert: false,
+      ),
+    );
+    expect(offlineNormal.state, SmokeUiState.offline);
+    expect(offlineNormal.detail, contains('45 dtk'));
+
+    final legacyOnline = evaluateSmokeUi(
+      FanStatus(
+        online: true,
+        lastSeenSec: 3,
+        hasLatest: true,
+        humidity: 60,
+        smoke: null,
+        smokeReady: false,
+        smokeAlert: false,
+      ),
+    );
+    expect(legacyOnline.state, SmokeUiState.unavailable);
+
+    final warmup = evaluateSmokeUi(
+      FanStatus(
+        online: true,
+        lastSeenSec: 3,
+        hasLatest: true,
+        humidity: 60,
+        smoke: 15,
+        smokeReady: false,
+        smokeAlert: false,
+      ),
+    );
+    expect(warmup.state, SmokeUiState.warmingUp);
+
+    final alertZeroPwm = evaluateSmokeUi(
+      FanStatus(
+        online: true,
+        lastSeenSec: 2,
+        hasLatest: true,
+        humidity: 62,
+        fanPwm: 0,
+        smoke: 320,
+        smokeReady: true,
+        smokeAlert: true,
+      ),
+    );
+    expect(alertZeroPwm.state, SmokeUiState.alert);
+    expect(alertZeroPwm.detail, contains('0 %'));
+
+    final normal = evaluateSmokeUi(
+      FanStatus(
+        online: true,
+        lastSeenSec: 2,
+        hasLatest: true,
+        humidity: 54,
+        fanPwm: 0,
+        smoke: -12,
+        smokeReady: true,
+        smokeAlert: false,
+      ),
+    );
+    expect(normal.state, SmokeUiState.normal);
+
+    final fetchedAt = DateTime(2026, 11, 25, 12, 0, 0);
+    final fresh = FanStatus(online: true, lastSeenSec: 5, hasLatest: true, smoke: 10, smokeReady: true);
+    expect(isEffectivelyOnline(fresh, fetchedAt, fetchedAt.add(const Duration(seconds: 10))), isTrue);
+    expect(isEffectivelyOnline(fresh, fetchedAt, fetchedAt.add(const Duration(seconds: 15))), isFalse);
+  });
+
+  testWidgets('aksi dua langkah _setMode dan respons polling origin lama dibatalkan saat sesi berubah', (tester) async {
+    const originA = 'https://origin-a.example.com';
+    const originB = 'https://origin-b.example.com';
+    SharedPreferences.setMockInitialValues({'base_url': originA});
+    await initAppConfig(trustedAdminOriginOverride: originA, isDebugMode: false);
+
+    final speedCompleter = Completer<http.Response>();
+    final originAPollCompleter = Completer<http.Response>();
+    final sentPaths = <String>[];
+    int statusCount = 0;
+
+    api_http.testHttpClient = MockClient((req) async {
+      sentPaths.add('${req.method} ${req.url}');
+      if (req.url.path == '/api/admin/verify') {
+        return http.Response(jsonEncode({'ok': true, 'role': 'admin'}), 200);
+      }
+      if (req.url.path == '/api/status') {
+        statusCount += 1;
+        if (statusCount == 1) {
+          return http.Response(
+            jsonEncode({
+              'device': 'fan01',
+              'online': true,
+              'last_seen_sec_ago': 2,
+              'latest': {
+                'humidity': 62.0,
+                'temperature': 27.5,
+                'fan_pwm': 40,
+                'mode': 'auto',
+                'state': 'RUNNING',
+                'power': true,
+                'smoke': 12,
+                'smoke_alert': false,
+                'smoke_ready': true,
+              },
+            }),
+            200,
+          );
+        }
+        if (req.url.toString().startsWith(originA)) {
+          return originAPollCompleter.future;
+        }
+        return http.Response(
+          jsonEncode({'device': 'fan01', 'online': false, 'latest': null}),
+          200,
+        );
+      }
+      if (req.url.path == '/api/speed') {
+        return speedCompleter.future;
+      }
+      return http.Response(jsonEncode({'ok': true}), 200);
+    });
+
+    addTearDown(() => api_http.testHttpClient = null);
+    expect(await verifyAndActivateAdmin('admin-secret-key'), isTrue);
+
+    await tester.pumpWidget(const MaterialApp(home: DashboardPage(isActive: true)));
+    await tester.pump();
+    await tester.pump();
+    expect(find.textContaining('62,0 %'), findsOneWidget);
+
+    await tester.scrollUntilVisible(
+      find.text('Manual'),
+      200,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.tap(find.text('Manual'));
+    await tester.pump();
+    expect(sentPaths.any((p) => p.endsWith('/api/speed')), isTrue);
+
+    await clearAdminSession();
+    speedCompleter.complete(http.Response(jsonEncode({'ok': true}), 200));
+    await tester.pump();
+
+    expect(sentPaths.any((p) => p.endsWith('/api/mode')), isFalse);
+
+    await tester.pump(const Duration(seconds: 3));
+    await setServerAddress(originB, isDebugMode: false);
+    originAPollCompleter.complete(
+      http.Response(
+        jsonEncode({
+          'device': 'fan01',
+          'online': true,
+          'last_seen_sec_ago': 1,
+          'latest': {
+            'humidity': 88.8,
+            'temperature': 30.0,
+            'fan_pwm': 90,
+            'mode': 'auto',
+            'state': 'RUNNING',
+            'power': true,
+            'smoke': 20,
+            'smoke_alert': false,
+            'smoke_ready': true,
+          },
+        }),
+        200,
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+    expect(find.textContaining('88,8 %'), findsNothing);
+  });
+
+  testWidgets('form jadwal yang sudah terbuka tidak mengirim mutasi jika sesi berubah sebelum pop', (tester) async {
+    const originA = 'https://origin-a.example.com';
+    SharedPreferences.setMockInitialValues({'base_url': originA});
+    await initAppConfig(trustedAdminOriginOverride: originA, isDebugMode: false);
+
+    final mutations = <String>[];
+    api_http.testHttpClient = MockClient((req) async {
+      if (req.url.path == '/api/admin/verify') {
+        return http.Response(jsonEncode({'ok': true, 'role': 'admin'}), 200);
+      }
+      if (req.method == 'GET' && req.url.path == '/api/schedules') {
+        return http.Response(jsonEncode({'device': 'fan01', 'schedules': []}), 200);
+      }
+      mutations.add('${req.method} ${req.url.path}');
+      return http.Response(jsonEncode({'ok': true}), 201);
+    });
+
+    addTearDown(() => api_http.testHttpClient = null);
+    expect(await verifyAndActivateAdmin('admin-secret-key'), isTrue);
+
+    await tester.pumpWidget(const MaterialApp(home: SchedulesPage(isActive: true)));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Tambah jadwal'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), 'Malam');
+
+    await clearAdminSession();
+    await tester.tap(find.text('Simpan'));
+    await tester.pumpAndSettle();
+
+    expect(mutations, isEmpty);
+  });
+
+  testWidgets('tab Masukan Guest mengirim sekali tanpa kunci, mengosongkan form pada 201, dan tidak mengulang 429', (tester) async {
+    const originA = 'https://origin-a.example.com';
+    SharedPreferences.setMockInitialValues({'base_url': originA});
+    await initAppConfig(trustedAdminOriginOverride: originA, isDebugMode: false);
+
+    int posts = 0;
+    int nextStatus = 201;
+    api_http.testHttpClient = MockClient((req) async {
+      if (req.url.path == '/api/feedback') {
+        posts += 1;
+        expect(req.headers.keys.any((k) => k.toLowerCase() == 'x-api-key'), isFalse);
+        if (nextStatus == 429) {
+          return http.Response(
+            jsonEncode({'error': 'terlalu banyak kiriman', 'retry_after_sec': 45}),
+            429,
+            headers: {'retry-after': '45'},
+          );
+        }
+        return http.Response(jsonEncode({'ok': true, 'id': 1}), 201);
+      }
+      return http.Response('{}', 404);
+    });
+
+    addTearDown(() => api_http.testHttpClient = null);
+    await tester.pumpWidget(const MaterialApp(home: FeedbackPage()));
+    await tester.pump();
+
+    await tester.enterText(find.byKey(const Key('feedback_name')), 'Pengunjung');
+    await tester.enterText(find.byKey(const Key('feedback_comment')), 'Demo alat lancar');
+    await tester.tap(find.byKey(const Key('feedback_submit')));
+    await tester.pumpAndSettle();
+
+    expect(posts, 1);
+    expect(find.textContaining('Terima kasih'), findsOneWidget);
+    final nameField = tester.widget<TextField>(find.byKey(const Key('feedback_name')));
+    final commentField = tester.widget<TextField>(find.byKey(const Key('feedback_comment')));
+    expect(nameField.controller?.text, isEmpty);
+    expect(commentField.controller?.text, isEmpty);
+
+    nextStatus = 429;
+    await tester.enterText(find.byKey(const Key('feedback_comment')), 'Coba lagi');
+    await tester.tap(find.byKey(const Key('feedback_submit')));
+    await tester.pumpAndSettle();
+
+    expect(posts, 2);
+    expect(find.textContaining('45 detik'), findsOneWidget);
+  });
+
+  test('computeSmokeYAxisBounds mencakup nilai delta negatif dan default batas atas', () {
+    final neg = computeSmokeYAxisBounds([-35, 10, 80]);
+    expect(neg.minY, lessThan(0));
+    expect(neg.maxY, greaterThanOrEqualTo(300));
+
+    final allNull = computeSmokeYAxisBounds([null, null]);
+    expect(allNull.minY, 0);
+    expect(allNull.maxY, 300);
+  });
+
+  testWidgets('Dashboard membedakan tampilan firmware lama tanpa MQ-2, pemanasan, dan offline di UI', (tester) async {
+    const originA = 'https://origin-a.example.com';
+    SharedPreferences.setMockInitialValues({'base_url': originA});
+    await initAppConfig(trustedAdminOriginOverride: originA, isDebugMode: false);
+
+    Map<String, dynamic> statusPayload = {
+      'device': 'fan01',
+      'online': true,
+      'last_seen_sec_ago': 2,
+      'latest': {
+        'humidity': 64.0,
+        'temperature': 27.0,
+        'fan_pwm': 40,
+        'mode': 'auto',
+        'state': 'RUNNING',
+        'power': true,
+        'smoke': null,
+        'smoke_alert': false,
+        'smoke_ready': false,
+      },
+    };
+
+    api_http.testHttpClient = MockClient((req) async {
+      if (req.url.path == '/api/status') {
+        expect(req.headers.keys.any((k) => k.toLowerCase() == 'x-api-key'), isFalse);
+        return http.Response(jsonEncode(statusPayload), 200);
+      }
+      return http.Response('{}', 404);
+    });
+    addTearDown(() => api_http.testHttpClient = null);
+
+    await tester.pumpWidget(const MaterialApp(home: DashboardPage(isActive: true)));
+    await tester.pump();
+    await tester.pump();
+    expect(find.text('Data MQ-2 tidak tersedia'), findsOneWidget);
+    expect(find.text('Pemanasan'), findsNothing);
+
+    // Pemanasan: smoke ada angka tapi smoke_ready false
+    statusPayload = {
+      'device': 'fan01',
+      'online': true,
+      'last_seen_sec_ago': 2,
+      'latest': {
+        'humidity': 64.0,
+        'temperature': 27.0,
+        'fan_pwm': 40,
+        'mode': 'auto',
+        'state': 'RUNNING',
+        'power': true,
+        'smoke': 12,
+        'smoke_alert': false,
+        'smoke_ready': false,
+      },
+    };
+    await tester.pump(const Duration(seconds: 3));
+    await tester.pump();
+    expect(find.text('Pemanasan'), findsOneWidget);
+
+    // Offline dengan sampel normal
+    statusPayload = {
+      'device': 'fan01',
+      'online': false,
+      'last_seen_sec_ago': 35,
+      'latest': {
+        'humidity': 55.0,
+        'temperature': 26.0,
+        'fan_pwm': 0,
+        'mode': 'auto',
+        'state': 'IDLE',
+        'power': true,
+        'smoke': 5,
+        'smoke_alert': false,
+        'smoke_ready': true,
+      },
+    };
+    await tester.pump(const Duration(seconds: 3));
+    await tester.pump();
+    expect(find.text('Offline'), findsOneWidget);
+    expect(find.text('Normal'), findsNothing);
   });
 }

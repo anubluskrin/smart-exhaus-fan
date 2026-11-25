@@ -23,12 +23,34 @@ const String _kLegacyApiKeyPref = 'api_key';
 const String _kSecureOriginKey = 'bathfan_admin_origin';
 const String _kSecureApiKey = 'bathfan_admin_api_key';
 
-const FlutterSecureStorage _secureStorage = FlutterSecureStorage(
-  aOptions: AndroidOptions(
-    resetOnError: true,
-    migrateWithBackup: false,
-  ),
-);
+abstract class SecureKvStorage {
+  Future<String?> read(String key);
+  Future<void> write(String key, String value);
+  Future<void> delete(String key);
+}
+
+class _FlutterSecureKvStorage implements SecureKvStorage {
+  const _FlutterSecureKvStorage();
+
+  static const FlutterSecureStorage _storage = FlutterSecureStorage(
+    aOptions: AndroidOptions(
+      resetOnError: true,
+      migrateWithBackup: false,
+    ),
+  );
+
+  @override
+  Future<String?> read(String key) => _storage.read(key: key);
+
+  @override
+  Future<void> write(String key, String value) =>
+      _storage.write(key: key, value: value);
+
+  @override
+  Future<void> delete(String key) => _storage.delete(key: key);
+}
+
+SecureKvStorage _secureStorage = const _FlutterSecureKvStorage();
 
 String _trustedAdminOrigin = parseTrustedAdminOrigin(_kDefinedAdminOrigin);
 String kBaseUrl = _computeDefaultBaseUrl(isDebugMode: kDebugMode);
@@ -37,7 +59,7 @@ String kApiKey = '';
 int kSessionEpoch = 0;
 
 final ValueNotifier<int> sessionNotifier = ValueNotifier<int>(0);
-Future<void> _sessionQueue = Future<void>.value();
+Future<void>? _sessionQueue;
 
 String get kTrustedAdminOrigin => _trustedAdminOrigin;
 
@@ -55,15 +77,27 @@ void _bumpEpoch() {
 }
 
 Future<T> _serializeSession<T>(Future<T> Function() action) {
-  final completer = Completer<T>();
-  _sessionQueue = _sessionQueue.then((_) async {
-    try {
-      completer.complete(await action());
-    } catch (e, st) {
-      completer.completeError(e, st);
+  final prev = _sessionQueue;
+  final done = Completer<void>();
+  _sessionQueue = done.future;
+
+  Future<T> run() async {
+    if (prev != null) {
+      try {
+        await prev;
+      } catch (_) {}
     }
-  });
-  return completer.future;
+    try {
+      return await action();
+    } finally {
+      if (identical(_sessionQueue, done.future)) {
+        _sessionQueue = null;
+      }
+      done.complete();
+    }
+  }
+
+  return run();
 }
 
 String _computeDefaultBaseUrl({required bool isDebugMode}) {
@@ -184,15 +218,19 @@ String? normalizeBaseUrl(String input, {bool? isDebugMode}) {
 
 Future<void> _deleteStoredAdminSession() async {
   try {
-    await _secureStorage.delete(key: _kSecureOriginKey);
-    await _secureStorage.delete(key: _kSecureApiKey);
+    await _secureStorage.delete(_kSecureOriginKey);
+    await _secureStorage.delete(_kSecureApiKey);
   } catch (_) {}
 }
 
 Future<void> initAppConfig({
   String? trustedAdminOriginOverride,
   bool? isDebugMode,
+  SecureKvStorage? secureStorageOverride,
 }) async {
+  if (secureStorageOverride != null) {
+    _secureStorage = secureStorageOverride;
+  }
   final debug = isDebugMode ?? kDebugMode;
   if (trustedAdminOriginOverride != null) {
     _trustedAdminOrigin = parseTrustedAdminOrigin(trustedAdminOriginOverride);
@@ -220,8 +258,8 @@ Future<void> initAppConfig({
 
   if (_trustedAdminOrigin.isNotEmpty && originOf(kBaseUrl) == _trustedAdminOrigin) {
     try {
-      final storedOrigin = await _secureStorage.read(key: _kSecureOriginKey);
-      final storedKey = await _secureStorage.read(key: _kSecureApiKey);
+      final storedOrigin = await _secureStorage.read(_kSecureOriginKey);
+      final storedKey = await _secureStorage.read(_kSecureApiKey);
       if (storedOrigin == _trustedAdminOrigin &&
           storedKey != null &&
           storedKey.trim().isNotEmpty) {
@@ -307,8 +345,8 @@ Future<bool> verifyAndActivateAdmin(
       return false;
     }
     try {
-      await _secureStorage.write(key: _kSecureOriginKey, value: targetOrigin);
-      await _secureStorage.write(key: _kSecureApiKey, value: key);
+      await _secureStorage.write(_kSecureOriginKey, targetOrigin);
+      await _secureStorage.write(_kSecureApiKey, key);
     } catch (_) {
       await _deleteStoredAdminSession();
       return false;
@@ -329,14 +367,15 @@ Future<bool> verifyAndActivateAdmin(
 }
 
 @visibleForTesting
-void resetConfigForTest() {
+void resetConfigForTest({SecureKvStorage? secureStorage}) {
   _trustedAdminOrigin = parseTrustedAdminOrigin(_kDefinedAdminOrigin);
+  _secureStorage = secureStorage ?? const _FlutterSecureKvStorage();
   kBaseUrl = _computeDefaultBaseUrl(isDebugMode: kDebugMode);
   kAdminOrigin = '';
   kApiKey = '';
   kSessionEpoch = 0;
   sessionNotifier.value = 0;
-  _sessionQueue = Future<void>.value();
+  _sessionQueue = null;
 }
 
 const Color kBg = Color(0xFF0B1D3A);
