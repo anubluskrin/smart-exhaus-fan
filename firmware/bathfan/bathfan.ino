@@ -3,6 +3,7 @@
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
 #include <DHT.h>
+#include <time.h>
 #include "secrets.h"
 #include "wifi_setup.h"
 
@@ -113,21 +114,6 @@ void connectWifi() {
     // DNS router tidak menjawab, jadi pakai DNS publik.
   WiFi.config(WiFi.localIP(), WiFi.gatewayIP(), WiFi.subnetMask(),
               IPAddress(8, 8, 8, 8), IPAddress(1, 1, 1, 1));
-}
-
-void connectMqtt() {
-  while (!mqtt.connected()) {
-    Serial.print("Menyambung MQTT... ");
-    String clientId = String("esp32-") + DEVICE_ID;
-    if (mqtt.connect(clientId.c_str(), MQTT_USER, MQTT_PASS)) {
-      Serial.println("terhubung");
-      mqtt.subscribe(topicCmdAll.c_str());
-      Serial.printf("Berlangganan: %s\n", topicCmdAll.c_str());
-    } else {
-      Serial.printf("gagal, rc=%d, coba lagi 5 detik\n", mqtt.state());
-      delay(5000);
-    }
-  }
 }
 
 // Tahan tombol BOOT (GPIO 0) selama 5 detik saat menyala untuk menghapus WiFi tersimpan.
@@ -379,6 +365,15 @@ void onMessage(char* topic, byte* payload, unsigned int length) {
   publishTelemetry();
 }
 
+void syncTimeAsync() {
+  // Sinkronisasi SNTP non-blocking untuk verifikasi masa berlaku sertifikat TLS.
+  configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+}
+
+bool isTimeSynced() {
+  return time(nullptr) >= 1700000000L;
+}
+
 void applyDns() {
   // DNS router tidak menjawab di sebagian jaringan, jadi pakai DNS publik.
   WiFi.config(WiFi.localIP(), WiFi.gatewayIP(), WiFi.subnetMask(),
@@ -389,6 +384,7 @@ void trackWifiState() {
   bool nowOn = (WiFi.status() == WL_CONNECTED);
   if (nowOn && !wasWifi) {
     applyDns();
+    syncTimeAsync();
     Serial.println("WiFi tersambung");
   } else if (!nowOn && wasWifi) {
     Serial.println("WiFi putus, fan tetap bekerja dari sensor");
@@ -419,6 +415,12 @@ void maintainMqtt() {
   if (lastMqttAttempt != 0 && now - lastMqttAttempt < RECONNECT_INTERVAL_MS) return;
   lastMqttAttempt = now;
 
+  if (!isTimeSynced()) {
+    syncTimeAsync();
+    Serial.println("Menunggu sinkronisasi waktu NTP untuk verifikasi TLS");
+    return;
+  }
+
   Serial.print("Menyambung MQTT... ");
   String clientId = String("esp32-") + DEVICE_ID;
   if (mqtt.connect(clientId.c_str(), MQTT_USER, MQTT_PASS)) {
@@ -426,7 +428,7 @@ void maintainMqtt() {
     mqtt.subscribe(topicCmdAll.c_str());
     Serial.printf("Berlangganan: %s\n", topicCmdAll.c_str());
   } else {
-    Serial.printf("gagal, rc=%d\n", mqtt.state());
+    Serial.printf("gagal, rc=%d (kontrol lokal tetap aktif)\n", mqtt.state());
   }
 }
 
@@ -453,12 +455,13 @@ void setup() {
   checkWifiResetButton();
   if (connectWifiSmart()) {
     applyDns();
+    syncTimeAsync();
     wasWifi = true;
   } else {
     Serial.println("Mode offline: fan tetap bekerja dari sensor, WiFi dicoba lagi berkala");
   }
               
-  net.setInsecure();   // sementara untuk pengembangan, diperketat di Tahap 8
+  net.setCACert(MQTT_CA_CERT);
   mqtt.setServer(MQTT_HOST, MQTT_PORT);
   mqtt.setBufferSize(512);
   mqtt.setSocketTimeout(5);

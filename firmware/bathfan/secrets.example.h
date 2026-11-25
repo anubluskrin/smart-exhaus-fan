@@ -7,3 +7,9 @@
 #define MQTT_PASS "ISI_PASSWORD"
 
 #define SETUP_AP_PASS "ISI_PASSWORD_PORTAL"
+
+// Salin isi sertifikat CA broker EMQX (emqxsl-ca.crt) agar TLS terverifikasi.
+#define MQTT_CA_CERT \
+"-----BEGIN CERTIFICATE-----\n" \
+"ISI_SERTIFIKAT_CA_EMQX\n" \
+"-----END CERTIFICATE-----\n"
