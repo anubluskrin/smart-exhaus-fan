@@ -52,7 +52,12 @@ class _FlutterSecureKvStorage implements SecureKvStorage {
 
 SecureKvStorage _secureStorage = const _FlutterSecureKvStorage();
 
-String _trustedAdminOrigin = parseTrustedAdminOrigin(_kDefinedAdminOrigin);
+bool _effectiveDebugMode = kDebugMode;
+bool _hasExplicitAdminOriginConfig = _kDefinedAdminOrigin.trim().isNotEmpty;
+String _trustedAdminOrigin = parseTrustedAdminOrigin(
+  _kDefinedAdminOrigin,
+  isDebugMode: kDebugMode,
+);
 String kBaseUrl = _computeDefaultBaseUrl(isDebugMode: kDebugMode);
 String kAdminOrigin = '';
 String kApiKey = '';
@@ -61,15 +66,28 @@ int kSessionEpoch = 0;
 final ValueNotifier<int> sessionNotifier = ValueNotifier<int>(0);
 Future<void>? _sessionQueue;
 
-String get kTrustedAdminOrigin => _trustedAdminOrigin;
+bool get isEffectiveDebugMode => _effectiveDebugMode;
 
-String get kDefaultBaseUrl => _computeDefaultBaseUrl(isDebugMode: kDebugMode);
+String get kTrustedAdminOrigin {
+  if (_hasExplicitAdminOriginConfig) return _trustedAdminOrigin;
+  if (_effectiveDebugMode && kBaseUrl.isNotEmpty) {
+    final u = Uri.tryParse(kBaseUrl);
+    if (u != null && isAllowedAdminTransport(u, isDebugMode: true)) {
+      return originOfUri(u);
+    }
+  }
+  return '';
+}
 
-bool get isAdminSession =>
-    _trustedAdminOrigin.isNotEmpty &&
-    kApiKey.isNotEmpty &&
-    kAdminOrigin == _trustedAdminOrigin &&
-    originOf(kBaseUrl) == _trustedAdminOrigin;
+String get kDefaultBaseUrl => _computeDefaultBaseUrl(isDebugMode: _effectiveDebugMode);
+
+bool get isAdminSession {
+  final trusted = kTrustedAdminOrigin;
+  return trusted.isNotEmpty &&
+      kApiKey.isNotEmpty &&
+      kAdminOrigin == trusted &&
+      originOf(kBaseUrl) == trusted;
+}
 
 void _bumpEpoch() {
   kSessionEpoch += 1;
@@ -155,7 +173,15 @@ String originOf(String url) {
   return originOfUri(u);
 }
 
-String parseTrustedAdminOrigin(String raw) {
+bool isAllowedAdminTransport(Uri u, {bool? isDebugMode}) {
+  if (u.host.isEmpty || u.userInfo.isNotEmpty) return false;
+  final scheme = u.scheme.toLowerCase();
+  if (scheme == 'https') return true;
+  final debug = isDebugMode ?? _effectiveDebugMode;
+  return scheme == 'http' && debug && isPrivateOrLoopbackHost(u.host);
+}
+
+String parseTrustedAdminOrigin(String raw, {bool? isDebugMode}) {
   final s = raw.trim();
   if (s.isEmpty) return '';
   if (s.contains('?') || s.contains('#') || s.contains('@') || s.contains(RegExp(r'\s'))) {
@@ -163,10 +189,8 @@ String parseTrustedAdminOrigin(String raw) {
   }
   final u = Uri.tryParse(s);
   if (u == null) return '';
-  if (u.scheme.toLowerCase() != 'https') return '';
-  if (u.host.isEmpty || u.userInfo.isNotEmpty || u.hasQuery || u.hasFragment) {
-    return '';
-  }
+  if (!isAllowedAdminTransport(u, isDebugMode: isDebugMode)) return '';
+  if (u.hasQuery || u.hasFragment) return '';
   if (u.path.isNotEmpty && u.path != '/') return '';
   if (u.hasPort && (u.port < 1 || u.port > 65535)) return '';
   return _formatCanonicalOrigin(u);
@@ -232,10 +256,19 @@ Future<void> initAppConfig({
     _secureStorage = secureStorageOverride;
   }
   final debug = isDebugMode ?? kDebugMode;
+  _effectiveDebugMode = debug;
   if (trustedAdminOriginOverride != null) {
-    _trustedAdminOrigin = parseTrustedAdminOrigin(trustedAdminOriginOverride);
+    _hasExplicitAdminOriginConfig = true;
+    _trustedAdminOrigin = parseTrustedAdminOrigin(
+      trustedAdminOriginOverride,
+      isDebugMode: debug,
+    );
   } else {
-    _trustedAdminOrigin = parseTrustedAdminOrigin(_kDefinedAdminOrigin);
+    _hasExplicitAdminOriginConfig = _kDefinedAdminOrigin.trim().isNotEmpty;
+    _trustedAdminOrigin = parseTrustedAdminOrigin(
+      _kDefinedAdminOrigin,
+      isDebugMode: debug,
+    );
   }
 
   kApiKey = '';
@@ -256,11 +289,12 @@ Future<void> initAppConfig({
     }
   } catch (_) {}
 
-  if (_trustedAdminOrigin.isNotEmpty && originOf(kBaseUrl) == _trustedAdminOrigin) {
+  final trustedOrigin = kTrustedAdminOrigin;
+  if (trustedOrigin.isNotEmpty && originOf(kBaseUrl) == trustedOrigin) {
     try {
       final storedOrigin = await _secureStorage.read(_kSecureOriginKey);
       final storedKey = await _secureStorage.read(_kSecureApiKey);
-      if (storedOrigin == _trustedAdminOrigin &&
+      if (storedOrigin == trustedOrigin &&
           storedKey != null &&
           storedKey.trim().isNotEmpty) {
         kAdminOrigin = storedOrigin!;
@@ -275,7 +309,10 @@ Future<void> initAppConfig({
 }
 
 Future<bool> setServerAddress(String input, {bool? isDebugMode}) async {
-  final normalized = normalizeBaseUrl(input, isDebugMode: isDebugMode);
+  final normalized = normalizeBaseUrl(
+    input,
+    isDebugMode: isDebugMode ?? _effectiveDebugMode,
+  );
   if (normalized == null) return false;
 
   final previousOrigin = originOf(kBaseUrl);
@@ -319,7 +356,7 @@ Future<bool> verifyAndActivateAdmin(
   final key = candidateKey.trim();
   if (key.isEmpty) return false;
 
-  final targetOrigin = _trustedAdminOrigin;
+  final targetOrigin = kTrustedAdminOrigin;
   if (targetOrigin.isEmpty || originOf(kBaseUrl) != targetOrigin) {
     return false;
   }
@@ -341,7 +378,7 @@ Future<bool> verifyAndActivateAdmin(
   return _serializeSession(() async {
     if (kSessionEpoch != startEpoch ||
         originOf(kBaseUrl) != targetOrigin ||
-        _trustedAdminOrigin != targetOrigin) {
+        kTrustedAdminOrigin != targetOrigin) {
       return false;
     }
     try {
@@ -354,7 +391,7 @@ Future<bool> verifyAndActivateAdmin(
 
     if (kSessionEpoch != startEpoch ||
         originOf(kBaseUrl) != targetOrigin ||
-        _trustedAdminOrigin != targetOrigin) {
+        kTrustedAdminOrigin != targetOrigin) {
       await _deleteStoredAdminSession();
       return false;
     }
@@ -367,10 +404,16 @@ Future<bool> verifyAndActivateAdmin(
 }
 
 @visibleForTesting
-void resetConfigForTest({SecureKvStorage? secureStorage}) {
-  _trustedAdminOrigin = parseTrustedAdminOrigin(_kDefinedAdminOrigin);
+void resetConfigForTest({SecureKvStorage? secureStorage, bool? isDebugMode}) {
+  final debug = isDebugMode ?? kDebugMode;
+  _effectiveDebugMode = debug;
+  _hasExplicitAdminOriginConfig = _kDefinedAdminOrigin.trim().isNotEmpty;
+  _trustedAdminOrigin = parseTrustedAdminOrigin(
+    _kDefinedAdminOrigin,
+    isDebugMode: debug,
+  );
   _secureStorage = secureStorage ?? const _FlutterSecureKvStorage();
-  kBaseUrl = _computeDefaultBaseUrl(isDebugMode: kDebugMode);
+  kBaseUrl = _computeDefaultBaseUrl(isDebugMode: debug);
   kAdminOrigin = '';
   kApiKey = '';
   kSessionEpoch = 0;

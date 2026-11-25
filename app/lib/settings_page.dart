@@ -567,9 +567,11 @@ class _SettingsPageState extends State<SettingsPage> {
           ),
           const SizedBox(height: 6),
           if (trusted.isEmpty)
-            const Text(
-              'Mode Admin dinonaktifkan pada build ini karena ADMIN_API_ORIGIN belum ditetapkan.',
-              style: TextStyle(fontSize: 12, color: kMuted),
+            Text(
+              isEffectiveDebugMode && kBaseUrl.isEmpty
+                  ? 'Atur alamat server terlebih dahulu untuk mengaktifkan Mode Admin.'
+                  : 'Mode Admin dinonaktifkan pada build ini karena ADMIN_API_ORIGIN belum ditetapkan.',
+              style: const TextStyle(fontSize: 12, color: kMuted),
             )
           else if (!originMatches)
             Text(

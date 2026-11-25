@@ -103,8 +103,12 @@ Future<h.Response> postPublic(
 }
 
 void _assertTrustedAdminUrl(Uri url) {
-  if (url.scheme.toLowerCase() != 'https') {
-    throw const AdminSessionException('Kredensial Admin hanya boleh dikirim melalui HTTPS');
+  if (!isAllowedAdminTransport(url)) {
+    throw AdminSessionException(
+      isEffectiveDebugMode
+          ? 'Kredensial Admin hanya boleh dikirim melalui HTTPS atau HTTP lokal/LAN pada mode debug'
+          : 'Kredensial Admin hanya boleh dikirim melalui HTTPS',
+    );
   }
   final trusted = kTrustedAdminOrigin;
   if (trusted.isEmpty || originOfUri(url) != trusted) {

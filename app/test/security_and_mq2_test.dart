@@ -784,4 +784,71 @@ void main() {
     expect(find.text('Alarm asap aktif'), findsOneWidget);
     expect(find.textContaining('Fan dilaporkan: 0 %'), findsOneWidget);
   });
+
+  test('mode debug mengizinkan Admin HTTP lokal/LAN tanpa ADMIN_API_ORIGIN, sementara mode release tetap wajib HTTPS + ADMIN_API_ORIGIN', () async {
+    // Mode release (isDebugMode: false): menolak HTTP lokal dan menonaktifkan Admin jika ADMIN_API_ORIGIN kosong
+    expect(parseTrustedAdminOrigin('http://localhost:3000', isDebugMode: false), isEmpty);
+    expect(parseTrustedAdminOrigin('http://192.168.1.10:3000', isDebugMode: false), isEmpty);
+    expect(parseTrustedAdminOrigin('http://example.com', isDebugMode: true), isEmpty);
+    expect(parseTrustedAdminOrigin('http://192.168.1.10:3000', isDebugMode: true), 'http://192.168.1.10:3000');
+
+    SharedPreferences.setMockInitialValues({'base_url': 'https://origin-a.example.com'});
+    await initAppConfig(isDebugMode: false);
+    expect(kTrustedAdminOrigin, isEmpty);
+    expect(await verifyAndActivateAdmin('secret'), isFalse);
+
+    // Mode debug (isDebugMode: true) tanpa ADMIN_API_ORIGIN: mengikuti alamat lokal/LAN aktif
+    const lanA = 'http://192.168.1.10:3000';
+    const lanB = 'http://192.168.1.20:3000';
+    SharedPreferences.setMockInitialValues({'base_url': lanA});
+    await initAppConfig(isDebugMode: true);
+    expect(kTrustedAdminOrigin, lanA);
+
+    final mockClient = MockClient((req) async {
+      if (req.url.toString() == '$lanA/api/admin/verify') {
+        expect(req.headers['X-API-Key'], 'local-demo-admin-key');
+        return http.Response(jsonEncode({'ok': true, 'role': 'admin'}), 200);
+      }
+      if (req.url.toString() == '$lanA/api/mode') {
+        expect(req.headers['X-API-Key'], 'local-demo-admin-key');
+        return http.Response(jsonEncode({'ok': true}), 200);
+      }
+      return http.Response('unexpected ${req.url}', 500);
+    });
+
+    expect(await verifyAndActivateAdmin('local-demo-admin-key', client: mockClient), isTrue);
+    expect(isAdminSession, isTrue);
+
+    final modeRes = await api_http.postAdmin(
+      Uri.parse('$lanA/api/mode'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({'mode': 'auto'}),
+      client: mockClient,
+    );
+    expect(modeRes.statusCode, 200);
+
+    // Permintaan Admin ke origin lain atau domain HTTP publik tetap ditolak
+    await expectLater(
+      () => api_http.postAdmin(
+        Uri.parse('$lanB/api/mode'),
+        body: jsonEncode({'mode': 'auto'}),
+        client: mockClient,
+      ),
+      throwsA(isA<api_http.AdminSessionException>()),
+    );
+    await expectLater(
+      () => api_http.postAdmin(
+        Uri.parse('http://example.com/api/mode'),
+        body: jsonEncode({'mode': 'auto'}),
+        client: mockClient,
+      ),
+      throwsA(isA<api_http.AdminSessionException>()),
+    );
+
+    // Mengganti alamat server ke IP LAN lain membatalkan sesi Admin sebelumnya
+    await setServerAddress(lanB);
+    expect(isAdminSession, isFalse);
+    expect(kApiKey, isEmpty);
+    expect(kTrustedAdminOrigin, lanB);
+  });
 }
