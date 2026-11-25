@@ -19,6 +19,9 @@ class FanStatus {
   final String? mode;
   final String? state;
   final bool power;
+  final int smoke;
+  final bool smokeAlert;
+  final bool smokeReady;
 
   FanStatus({
     required this.online,
@@ -29,6 +32,9 @@ class FanStatus {
     this.mode,
     this.state,
     this.power = true,
+    this.smoke = 0,
+    this.smokeAlert = false,
+    this.smokeReady = false,
   });
 
   factory FanStatus.fromJson(Map<String, dynamic> j) {
@@ -42,6 +48,9 @@ class FanStatus {
       mode: latest?['mode'] as String?,
       state: latest?['state'] as String?,
       power: (latest?['power'] as bool?) ?? true,
+      smoke: (latest?['smoke'] as num?)?.toInt() ?? 0,
+      smokeAlert: (latest?['smoke_alert'] as bool?) ?? false,
+      smokeReady: (latest?['smoke_ready'] as bool?) ?? false,
     );
   }
 }
@@ -191,6 +200,7 @@ class _DashboardPageState extends State<DashboardPage> {
     final mode = _pendingMode ?? s?.mode ?? 'auto';
     final power = _pendingPower ?? s?.power ?? true;
     final standby = power && s?.state == 'STANDBY';
+    final smoke = power && (s?.smokeAlert ?? false);
 
     return Scaffold(
       body: SafeArea(
@@ -220,8 +230,17 @@ class _DashboardPageState extends State<DashboardPage> {
                 ],
               ),
               const SizedBox(height: 16),
-              _hero(s, power ? color : const Color(0xFF4B5F7F)),
+              _hero(
+                s,
+                !power
+                    ? const Color(0xFF4B5F7F)
+                    : (smoke ? const Color(0xFFEF4444) : color),
+              ),
               const SizedBox(height: 16),
+              if (smoke) ...[
+                _smokeBanner(),
+                const SizedBox(height: 16),
+              ],
               if (standby) ...[
                 _standbyBanner(),
                 const SizedBox(height: 16),
@@ -236,15 +255,31 @@ class _DashboardPageState extends State<DashboardPage> {
               const SizedBox(height: 16),
               _modeSelector(mode),
               if (mode == 'manual') ...[
-                const SizedBox(height: 16),
-                IgnorePointer(
-                  ignoring: standby,
-                  child: Opacity(
-                  opacity: standby ? 0.4 : 1,
-                  child: _speedCard(),
+              const SizedBox(height: 16),
+              _airCard(s),
+              const SizedBox(height: 16),
+              IgnorePointer(
+                ignoring: !power,
+                child: Opacity(
+                  opacity: power ? 1 : 0.4,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      _modeSelector(mode),
+                      if (mode == 'manual') ...[
+                        const SizedBox(height: 16),
+                        IgnorePointer(
+                          ignoring: standby || smoke,
+                          child: Opacity(
+                            opacity: (standby || smoke) ? 0.4 : 1,
+                            child: _speedCard(),
+                          ),
+                        ),
+                      ],
+                    ],
                   ),
                 ),
-              ],
+              ),
 
               if (_error != null)
                 Padding(
@@ -254,6 +289,7 @@ class _DashboardPageState extends State<DashboardPage> {
                     style: const TextStyle(color: Color(0xFFF87171)),
                   ),
                 ),
+            ],
             ],
           ),
         ),
@@ -414,6 +450,95 @@ class _DashboardPageState extends State<DashboardPage> {
               ],
             ),
           ),
+        ],
+      ),
+    );
+  }
+
+    Widget _smokeBanner() {
+    const color = Color(0xFFF87171);
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: color.withValues(alpha: 0.7)),
+        color: color.withValues(alpha: 0.14),
+      ),
+      child: const Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.warning_amber_rounded, color: color),
+          SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Asap terdeteksi',
+                  style: TextStyle(fontWeight: FontWeight.w700, fontSize: 15),
+                ),
+                SizedBox(height: 2),
+                Text(
+                  'Fan menyala penuh sampai udara bersih. Fan berhenti setelah asap hilang dan kelembapan aman.',
+                  style: TextStyle(fontSize: 13, color: kMuted),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _airCard(FanStatus? s) {
+    String label;
+    Color color;
+    if (s == null) {
+      label = '--';
+      color = kMuted;
+    } else if (!s.smokeReady) {
+      label = 'Sensor memanas';
+      color = const Color(0xFFFACC15);
+    } else if (s.smokeAlert) {
+      label = 'Asap terdeteksi';
+      color = const Color(0xFFF87171);
+    } else {
+      label = 'Bersih';
+      color = const Color(0xFF4ADE80);
+    }
+    return _card(
+      Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('Kualitas udara',
+                    style: TextStyle(fontSize: 13, color: kMuted)),
+                const SizedBox(height: 4),
+                Text(
+                  label,
+                  style: TextStyle(
+                    fontSize: 20,
+                    fontWeight: FontWeight.w700,
+                    color: color,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                const Text(
+                  'Indikator untuk menyalakan fan, bukan alarm kebakaran.',
+                  style: TextStyle(fontSize: 12, color: kMuted),
+                ),
+              ],
+            ),
+          ),
+          if (s != null && s.smokeReady)
+            Text(
+              '+${s.smoke}',
+              style: const TextStyle(
+                  fontSize: 18, fontWeight: FontWeight.w700, color: kAccent),
+            ),
         ],
       ),
     );
