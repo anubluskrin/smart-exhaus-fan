@@ -2,3 +2,5 @@
 secrets.h
 node_modules/
 *.db
+
+AGENTS.md
