@@ -1,50 +1,342 @@
-import 'package:flutter/material.dart';
+import 'dart:async';
+
+import 'package:flutter/foundation.dart';
+import 'package:flutter/painting.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
-// Dengan "adb reverse", HP menjangkau backend lewat localhost.
-// (Untuk emulator Android, ganti menjadi http://10.0.2.2:3000)
-const String kDefaultBaseUrl = 'http://192.168.110.42:3000';
+import 'api_http.dart' as api_http;
 
-// Alamat backend yang sedang dipakai. Bisa diubah dari layar Pengaturan.
-String kBaseUrl = kDefaultBaseUrl;
+const String _kDefinedAdminOrigin = String.fromEnvironment(
+  'ADMIN_API_ORIGIN',
+  defaultValue: '',
+);
+const String _kDefinedDefaultBaseUrl = String.fromEnvironment(
+  'DEFAULT_BASE_URL',
+  defaultValue: '',
+);
+const String _kLegacyDebugDefaultUrl = 'http://192.168.110.42:3000';
 
-const String _kPrefKey = 'base_url';
+const String _kBaseUrlPref = 'base_url';
+const String _kLegacyApiKeyPref = 'api_key';
+const String _kSecureOriginKey = 'bathfan_admin_origin';
+const String _kSecureApiKey = 'bathfan_admin_api_key';
 
-/// Merapikan alamat yang diketik pengguna. Mengembalikan null kalau tidak valid.
-String? normalizeBaseUrl(String input) {
-  var s = input.trim();
-  if (s.isEmpty) return null;
-  if (!s.startsWith('http://') && !s.startsWith('https://')) {
-    s = 'http://$s';
-  }
-  while (s.endsWith('/')) {
-    s = s.substring(0, s.length - 1);
-  }
-  final u = Uri.tryParse(s);
-  if (u == null || u.host.isEmpty) return null;
-  if (u.scheme != 'http' && u.scheme != 'https') return null;
-  if (u.path.isNotEmpty) return null; // hanya alamat server, tanpa jalur
-  if (!u.hasPort && u.scheme == 'http') s = '$s:3000';
-  return s;
+const FlutterSecureStorage _secureStorage = FlutterSecureStorage(
+  aOptions: AndroidOptions(
+    resetOnError: true,
+    migrateWithBackup: false,
+  ),
+);
+
+String _trustedAdminOrigin = parseTrustedAdminOrigin(_kDefinedAdminOrigin);
+String kBaseUrl = _computeDefaultBaseUrl(isDebugMode: kDebugMode);
+String kAdminOrigin = '';
+String kApiKey = '';
+int kSessionEpoch = 0;
+
+final ValueNotifier<int> sessionNotifier = ValueNotifier<int>(0);
+Future<void> _sessionQueue = Future<void>.value();
+
+String get kTrustedAdminOrigin => _trustedAdminOrigin;
+
+String get kDefaultBaseUrl => _computeDefaultBaseUrl(isDebugMode: kDebugMode);
+
+bool get isAdminSession =>
+    _trustedAdminOrigin.isNotEmpty &&
+    kApiKey.isNotEmpty &&
+    kAdminOrigin == _trustedAdminOrigin &&
+    originOf(kBaseUrl) == _trustedAdminOrigin;
+
+void _bumpEpoch() {
+  kSessionEpoch += 1;
+  sessionNotifier.value = kSessionEpoch;
 }
 
-Future<void> loadBaseUrl() async {
+Future<T> _serializeSession<T>(Future<T> Function() action) {
+  final completer = Completer<T>();
+  _sessionQueue = _sessionQueue.then((_) async {
+    try {
+      completer.complete(await action());
+    } catch (e, st) {
+      completer.completeError(e, st);
+    }
+  });
+  return completer.future;
+}
+
+String _computeDefaultBaseUrl({required bool isDebugMode}) {
+  if (_kDefinedDefaultBaseUrl.isNotEmpty) {
+    final normalized = normalizeBaseUrl(
+      _kDefinedDefaultBaseUrl,
+      isDebugMode: isDebugMode,
+    );
+    if (normalized != null) return normalized;
+  }
+  if (_trustedAdminOrigin.isNotEmpty) return _trustedAdminOrigin;
+  return isDebugMode ? _kLegacyDebugDefaultUrl : '';
+}
+
+final RegExp _ipv4Re = RegExp(r'^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$');
+
+bool isPrivateOrLoopbackHost(String host) {
+  final lower = host.toLowerCase();
+  if (lower == 'localhost' || lower == '::1') return true;
+  final m = _ipv4Re.firstMatch(lower);
+  if (m == null) return false;
+  final a = int.parse(m.group(1)!);
+  final b = int.parse(m.group(2)!);
+  final c = int.parse(m.group(3)!);
+  final d = int.parse(m.group(4)!);
+  if (a > 255 || b > 255 || c > 255 || d > 255) return false;
+
+  if (a == 127) return true; // 127.0.0.0/8 loopback
+  if (a == 10) return true; // 10.0.0.0/8 privat (termasuk 10.0.2.2)
+  if (a == 172 && b >= 16 && b <= 31) return true; // 172.16.0.0/12
+  if (a == 192 && b == 168) return true; // 192.168.0.0/16
+  return false;
+}
+
+String _formatCanonicalOrigin(Uri u) {
+  final scheme = u.scheme.toLowerCase();
+  final host = u.host.toLowerCase();
+  final formattedHost = host.contains(':') ? '[$host]' : host;
+  final defaultPort = scheme == 'https' ? 443 : 80;
+  final portPart = u.hasPort && u.port != defaultPort ? ':${u.port}' : '';
+  return '$scheme://$formattedHost$portPart';
+}
+
+String originOfUri(Uri u) {
+  final scheme = u.scheme.toLowerCase();
+  if (scheme != 'http' && scheme != 'https') return '';
+  if (u.host.isEmpty || u.userInfo.isNotEmpty) return '';
+  return _formatCanonicalOrigin(u);
+}
+
+String originOf(String url) {
+  if (url.trim().isEmpty) return '';
+  final u = Uri.tryParse(url.trim());
+  if (u == null) return '';
+  return originOfUri(u);
+}
+
+String parseTrustedAdminOrigin(String raw) {
+  final s = raw.trim();
+  if (s.isEmpty) return '';
+  if (s.contains('?') || s.contains('#') || s.contains('@') || s.contains(RegExp(r'\s'))) {
+    return '';
+  }
+  final u = Uri.tryParse(s);
+  if (u == null) return '';
+  if (u.scheme.toLowerCase() != 'https') return '';
+  if (u.host.isEmpty || u.userInfo.isNotEmpty || u.hasQuery || u.hasFragment) {
+    return '';
+  }
+  if (u.path.isNotEmpty && u.path != '/') return '';
+  if (u.hasPort && (u.port < 1 || u.port > 65535)) return '';
+  return _formatCanonicalOrigin(u);
+}
+
+/// Merapikan dan memvalidasi alamat server.
+/// Mengembalikan null jika alamat tidak valid atau menggunakan HTTP publik/release.
+String? normalizeBaseUrl(String input, {bool? isDebugMode}) {
+  final debug = isDebugMode ?? kDebugMode;
+  final s = input.trim();
+  if (s.isEmpty) return null;
+  if (s.contains('?') || s.contains('#') || s.contains('@') || s.contains(RegExp(r'\s'))) {
+    return null;
+  }
+
+  String candidate;
+  if (s.contains('://')) {
+    final lower = s.toLowerCase();
+    if (!lower.startsWith('http://') && !lower.startsWith('https://')) {
+      return null;
+    }
+    candidate = s;
+  } else {
+    final probe = Uri.tryParse('https://$s');
+    if (probe == null || probe.host.isEmpty) return null;
+    if (debug && isPrivateOrLoopbackHost(probe.host)) {
+      candidate = probe.hasPort ? 'http://$s' : 'http://$s:3000';
+    } else {
+      candidate = 'https://$s';
+    }
+  }
+
+  final u = Uri.tryParse(candidate);
+  if (u == null || u.host.isEmpty) return null;
+  if (u.userInfo.isNotEmpty || u.hasQuery || u.hasFragment) return null;
+  if (u.path.isNotEmpty && u.path != '/') return null;
+  if (u.hasPort && (u.port < 1 || u.port > 65535)) return null;
+
+  final scheme = u.scheme.toLowerCase();
+  if (scheme == 'https') {
+    return _formatCanonicalOrigin(u);
+  }
+  if (scheme == 'http') {
+    if (!debug || !isPrivateOrLoopbackHost(u.host)) return null;
+    return _formatCanonicalOrigin(u);
+  }
+  return null;
+}
+
+Future<void> _deleteStoredAdminSession() async {
   try {
-    final p = await SharedPreferences.getInstance();
-    final saved = p.getString(_kPrefKey);
-    if (saved != null && normalizeBaseUrl(saved) != null) kBaseUrl = saved;
+    await _secureStorage.delete(key: _kSecureOriginKey);
+    await _secureStorage.delete(key: _kSecureApiKey);
   } catch (_) {}
 }
 
-Future<bool> saveBaseUrl(String normalized) async {
+Future<void> initAppConfig({
+  String? trustedAdminOriginOverride,
+  bool? isDebugMode,
+}) async {
+  final debug = isDebugMode ?? kDebugMode;
+  if (trustedAdminOriginOverride != null) {
+    _trustedAdminOrigin = parseTrustedAdminOrigin(trustedAdminOriginOverride);
+  } else {
+    _trustedAdminOrigin = parseTrustedAdminOrigin(_kDefinedAdminOrigin);
+  }
+
+  kApiKey = '';
+  kAdminOrigin = '';
+  kBaseUrl = _computeDefaultBaseUrl(isDebugMode: debug);
+
   try {
-    final p = await SharedPreferences.getInstance();
-    await p.setString(_kPrefKey, normalized);
-    kBaseUrl = normalized;
-    return true;
+    final prefs = await SharedPreferences.getInstance();
+    if (prefs.containsKey(_kLegacyApiKeyPref)) {
+      await prefs.remove(_kLegacyApiKeyPref);
+    }
+    final savedUrl = prefs.getString(_kBaseUrlPref);
+    if (savedUrl != null) {
+      final normalized = normalizeBaseUrl(savedUrl, isDebugMode: debug);
+      if (normalized != null) {
+        kBaseUrl = normalized;
+      }
+    }
+  } catch (_) {}
+
+  if (_trustedAdminOrigin.isNotEmpty && originOf(kBaseUrl) == _trustedAdminOrigin) {
+    try {
+      final storedOrigin = await _secureStorage.read(key: _kSecureOriginKey);
+      final storedKey = await _secureStorage.read(key: _kSecureApiKey);
+      if (storedOrigin == _trustedAdminOrigin &&
+          storedKey != null &&
+          storedKey.trim().isNotEmpty) {
+        kAdminOrigin = storedOrigin!;
+        kApiKey = storedKey.trim();
+      }
+    } catch (_) {
+      kAdminOrigin = '';
+      kApiKey = '';
+    }
+  }
+  _bumpEpoch();
+}
+
+Future<bool> setServerAddress(String input, {bool? isDebugMode}) async {
+  final normalized = normalizeBaseUrl(input, isDebugMode: isDebugMode);
+  if (normalized == null) return false;
+
+  final previousOrigin = originOf(kBaseUrl);
+  final nextOrigin = originOf(normalized);
+  final originChanged = previousOrigin != nextOrigin;
+
+  if (originChanged) {
+    kApiKey = '';
+    kAdminOrigin = '';
+  }
+  kBaseUrl = normalized;
+  _bumpEpoch();
+
+  return _serializeSession(() async {
+    if (originChanged) {
+      await _deleteStoredAdminSession();
+    }
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_kBaseUrlPref, normalized);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  });
+}
+
+Future<void> clearAdminSession() async {
+  kApiKey = '';
+  kAdminOrigin = '';
+  _bumpEpoch();
+  await _serializeSession(() async {
+    await _deleteStoredAdminSession();
+  });
+}
+
+Future<bool> verifyAndActivateAdmin(
+  String candidateKey, {
+  http.Client? client,
+}) async {
+  final key = candidateKey.trim();
+  if (key.isEmpty) return false;
+
+  final targetOrigin = _trustedAdminOrigin;
+  if (targetOrigin.isEmpty || originOf(kBaseUrl) != targetOrigin) {
+    return false;
+  }
+
+  final startEpoch = kSessionEpoch;
+  http.Response res;
+  try {
+    res = await api_http.verifyAdminRequest(
+      Uri.parse('$targetOrigin/api/admin/verify'),
+      apiKey: key,
+      client: client,
+    );
   } catch (_) {
     return false;
   }
+
+  if (res.statusCode != 200) return false;
+
+  return _serializeSession(() async {
+    if (kSessionEpoch != startEpoch ||
+        originOf(kBaseUrl) != targetOrigin ||
+        _trustedAdminOrigin != targetOrigin) {
+      return false;
+    }
+    try {
+      await _secureStorage.write(key: _kSecureOriginKey, value: targetOrigin);
+      await _secureStorage.write(key: _kSecureApiKey, value: key);
+    } catch (_) {
+      await _deleteStoredAdminSession();
+      return false;
+    }
+
+    if (kSessionEpoch != startEpoch ||
+        originOf(kBaseUrl) != targetOrigin ||
+        _trustedAdminOrigin != targetOrigin) {
+      await _deleteStoredAdminSession();
+      return false;
+    }
+
+    kAdminOrigin = targetOrigin;
+    kApiKey = key;
+    _bumpEpoch();
+    return true;
+  });
+}
+
+@visibleForTesting
+void resetConfigForTest() {
+  _trustedAdminOrigin = parseTrustedAdminOrigin(_kDefinedAdminOrigin);
+  kBaseUrl = _computeDefaultBaseUrl(isDebugMode: kDebugMode);
+  kAdminOrigin = '';
+  kApiKey = '';
+  kSessionEpoch = 0;
+  sessionNotifier.value = 0;
+  _sessionQueue = Future<void>.value();
 }
 
 const Color kBg = Color(0xFF0B1D3A);
@@ -65,28 +357,4 @@ String humidityLabel(double h) {
   if (h < 70) return 'waspada';
   if (h < 90) return 'tinggi';
   return 'kritis';
-}
-
-// Kunci API untuk backend. Diisi dari layar Pengaturan.
-String kApiKey = '';
-
-const String _kKeyPref = 'api_key';
-
-Future<void> loadApiKey() async {
-  try {
-    final p = await SharedPreferences.getInstance();
-    kApiKey = p.getString(_kKeyPref) ?? '';
-  } catch (_) {}
-}
-
-Future<bool> saveApiKey(String key) async {
-  try {
-    final p = await SharedPreferences.getInstance();
-    final k = key.trim();
-    await p.setString(_kKeyPref, k);
-    kApiKey = k;
-    return true;
-  } catch (_) {
-    return false;
-  }
 }
