@@ -6,8 +6,9 @@ const { startScheduler } = require('./scheduler');
 
 const INSERT_SQL = `
   INSERT INTO telemetry
-    (device_id, humidity, temperature, fan_pwm, mode, state, power)
-  VALUES ($1, $2, $3, $4, $5, $6, $7)
+    (device_id, humidity, temperature, fan_pwm, mode, state, power,
+     smoke, smoke_alert, smoke_ready)
+  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 `;
 
 async function main() {
@@ -57,6 +58,9 @@ async function main() {
         typeof data.mode === 'string' ? data.mode : 'auto',
         typeof data.state === 'string' ? data.state : null,
         typeof data.power === 'boolean' ? data.power : true,
+        Number.isFinite(data.smoke) ? Math.round(data.smoke) : null,
+        typeof data.smoke_alert === 'boolean' ? data.smoke_alert : false,
+        typeof data.smoke_ready === 'boolean' ? data.smoke_ready : false,
       ]);
       console.log(
         `Tersimpan [${deviceId}] hum=${data.hum} temp=${data.temp} pwm=${data.pwm} state=${data.state}`

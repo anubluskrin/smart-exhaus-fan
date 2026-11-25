@@ -16,7 +16,8 @@ const RANGES = {
 const DEVICE_RE = /^[A-Za-z0-9_-]{1,32}$/;
 
 const LATEST_SQL = `
-  SELECT humidity, temperature, fan_pwm, mode, state, power, created_at
+  SELECT humidity, temperature, fan_pwm, mode, state, power,
+         smoke, smoke_alert, smoke_ready, created_at
   FROM telemetry
   WHERE device_id = $1
   ORDER BY id DESC
@@ -28,7 +29,8 @@ const HISTORY_SQL = `
     to_timestamp((floor(extract(epoch FROM created_at) / $3::int) * $3::int)::double precision) AS t,
     ROUND(AVG(humidity)::numeric, 1)::float8 AS humidity,
     ROUND(AVG(temperature)::numeric, 1)::float8 AS temperature,
-    ROUND(AVG(fan_pwm)::numeric)::int AS fan_pwm
+    ROUND(AVG(fan_pwm)::numeric)::int AS fan_pwm,
+    ROUND(AVG(smoke)::numeric)::int AS smoke
   FROM telemetry
   WHERE device_id = $1 AND created_at >= $2
   GROUP BY 1
@@ -98,6 +100,9 @@ function startApi(mqttClient) {
           mode: row.mode,
           state: row.state,
           power: row.power ?? true,
+          smoke: row.smoke ?? 0,
+          smoke_alert: row.smoke_alert ?? false,
+          smoke_ready: row.smoke_ready ?? false,
           time: row.created_at,
         },
       });
@@ -317,11 +322,13 @@ function startApi(mqttClient) {
   });
 
     // ===== Pengaturan perangkat =====
-  const DEFAULT_CONFIG = {
+    const DEFAULT_CONFIG = {
     hum_on: 70,
     hum_off: 60,
-    post_run_sec: 300,
+    post_run_sec: 60,
     max_pwm: 100,
+    smoke_on: 250,
+    smoke_off: 100,
   };
   const CONFIG_KEYS = Object.keys(DEFAULT_CONFIG);
 
@@ -340,16 +347,26 @@ function startApi(mqttClient) {
     if (!Number.isInteger(c.max_pwm) || c.max_pwm < 30 || c.max_pwm > 100) {
       return 'max_pwm harus bilangan bulat 30 sampai 100';
     }
+    if (!Number.isInteger(c.smoke_on) || c.smoke_on < 100 || c.smoke_on > 1000) {
+      return 'smoke_on harus bilangan bulat 100 sampai 1000';
+    }
+    if (!Number.isInteger(c.smoke_off) || c.smoke_off < 30) {
+      return 'smoke_off harus bilangan bulat minimal 30';
+    }
+    if (c.smoke_on - c.smoke_off < 50) {
+      return 'selisih smoke_on dan smoke_off minimal 50';
+    }
     return null;
   }
 
-  async function readConfig(device) {
+    async function readConfig(device) {
     await pool.query(
       'INSERT INTO device_config (device_id) VALUES ($1) ON CONFLICT DO NOTHING',
       [device]
     );
     const { rows } = await pool.query(
-      'SELECT hum_on, hum_off, post_run_sec, max_pwm FROM device_config WHERE device_id = $1',
+      `SELECT hum_on, hum_off, post_run_sec, max_pwm, smoke_on, smoke_off
+       FROM device_config WHERE device_id = $1`,
       [device]
     );
     return rows[0];
@@ -358,13 +375,14 @@ function startApi(mqttClient) {
   async function writeConfig(device, c) {
     await pool.query(
       `UPDATE device_config
-       SET hum_on = $2, hum_off = $3, post_run_sec = $4, max_pwm = $5, updated_at = now()
+       SET hum_on = $2, hum_off = $3, post_run_sec = $4, max_pwm = $5,
+           smoke_on = $6, smoke_off = $7, updated_at = now()
        WHERE device_id = $1`,
-      [device, c.hum_on, c.hum_off, c.post_run_sec, c.max_pwm]
+      [device, c.hum_on, c.hum_off, c.post_run_sec, c.max_pwm, c.smoke_on, c.smoke_off]
     );
   }
 
-    function publishConfig(device, config) {
+  function publishConfig(device, config) {
     if (!mqttClient.connected) return;
     mqttClient.publish(
       `bathfan/${device}/cmd/config`,
@@ -373,6 +391,8 @@ function startApi(mqttClient) {
         hum_off: config.hum_off,
         post_run_sec: config.post_run_sec,
         max_pwm: config.max_pwm,
+        smoke_on: config.smoke_on,
+        smoke_off: config.smoke_off,
       }),
       { qos: 1, retain: true }
     );
@@ -385,7 +405,7 @@ function startApi(mqttClient) {
   async function syncAllConfigs() {
     try {
       const { rows } = await pool.query(
-        'SELECT device_id, hum_on, hum_off, post_run_sec, max_pwm FROM device_config'
+        'SELECT device_id, hum_on, hum_off, post_run_sec, max_pwm, smoke_on, smoke_off FROM device_config'
       );
       for (const r of rows) publishConfig(r.device_id, r);
     } catch (e) {

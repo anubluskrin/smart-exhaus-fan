@@ -154,19 +154,20 @@ void runSetupPortal(unsigned long maxMs) {
   WiFi.mode(WIFI_STA);
 }
 
-// Dipanggil dari setup(). Tidak kembali sebelum WiFi tersambung.
-void connectWifiSmart() {
-  while (true) {
-    String s = savedSsid();
-    String p = savedPass();
-    if (s.length() > 0) {
-      Serial.printf("Mencoba WiFi tersimpan: %s\n", s.c_str());
-      if (wifiTry(s, p, 20000)) return;
-    }
-    Serial.printf("Mencoba WiFi bawaan (secrets.h): %s\n", WIFI_SSID);
-    if (wifiTry(WIFI_SSID, WIFI_PASS, 20000)) return;
 
-    Serial.println("Membuka portal pengaturan WiFi (3 menit)...");
-    runSetupPortal(180000);
+// Dipanggil dari setup(). Mengembalikan true kalau WiFi tersambung.
+// Kalau tidak, program lanjut dalam mode offline dan loop() mencoba lagi berkala.
+bool connectWifiSmart() {
+  String s = savedSsid();
+  String p = savedPass();
+  if (s.length() > 0) {
+    Serial.printf("Mencoba WiFi tersimpan: %s\n", s.c_str());
+    if (wifiTry(s, p, 20000)) return true;
   }
+  Serial.printf("Mencoba WiFi bawaan (secrets.h): %s\n", WIFI_SSID);
+  if (wifiTry(WIFI_SSID, WIFI_PASS, 20000)) return true;
+
+  Serial.println("Membuka portal pengaturan WiFi (2 menit)...");
+  runSetupPortal(120000);   // restart sendiri kalau WiFi disimpan
+  return false;
 }

@@ -25,6 +25,15 @@ async function init() {
     await pool.query(
     'ALTER TABLE telemetry ADD COLUMN IF NOT EXISTS power BOOLEAN'
   );
+    await pool.query(
+    'ALTER TABLE telemetry ADD COLUMN IF NOT EXISTS smoke INTEGER'
+  );
+  await pool.query(
+    'ALTER TABLE telemetry ADD COLUMN IF NOT EXISTS smoke_alert BOOLEAN'
+  );
+  await pool.query(
+    'ALTER TABLE telemetry ADD COLUMN IF NOT EXISTS smoke_ready BOOLEAN'
+  );
 
     await pool.query(`
     CREATE TABLE IF NOT EXISTS schedules (
@@ -56,6 +65,12 @@ async function init() {
   `);
   await pool.query(
     "INSERT INTO device_config (device_id) VALUES ('fan01') ON CONFLICT DO NOTHING"
+  );
+  await pool.query(
+    'ALTER TABLE device_config ADD COLUMN IF NOT EXISTS smoke_on INTEGER NOT NULL DEFAULT 250'
+  );
+  await pool.query(
+    'ALTER TABLE device_config ADD COLUMN IF NOT EXISTS smoke_off INTEGER NOT NULL DEFAULT 100'
   );
 }
 

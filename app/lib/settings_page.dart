@@ -10,12 +10,16 @@ class DeviceConfig {
   final double humOff;
   final int postRunSec;
   final int maxPwm;
+  final int smokeOn;
+  final int smokeOff;
 
   const DeviceConfig({
     required this.humOn,
     required this.humOff,
     required this.postRunSec,
     required this.maxPwm,
+    required this.smokeOn,
+    required this.smokeOff,
   });
 
   factory DeviceConfig.fromJson(Map<String, dynamic> j) => DeviceConfig(
@@ -23,6 +27,8 @@ class DeviceConfig {
         humOff: (j['hum_off'] as num).toDouble(),
         postRunSec: (j['post_run_sec'] as num).toInt(),
         maxPwm: (j['max_pwm'] as num).toInt(),
+        smokeOn: (j['smoke_on'] as num?)?.toInt() ?? 250,
+        smokeOff: (j['smoke_off'] as num?)?.toInt() ?? 100,
       );
 
   DeviceConfig copyWith({
@@ -30,12 +36,16 @@ class DeviceConfig {
     double? humOff,
     int? postRunSec,
     int? maxPwm,
+    int? smokeOn,
+    int? smokeOff,
   }) =>
       DeviceConfig(
         humOn: humOn ?? this.humOn,
         humOff: humOff ?? this.humOff,
         postRunSec: postRunSec ?? this.postRunSec,
         maxPwm: maxPwm ?? this.maxPwm,
+        smokeOn: smokeOn ?? this.smokeOn,
+        smokeOff: smokeOff ?? this.smokeOff,
       );
 
   bool same(DeviceConfig? o) =>
@@ -43,7 +53,9 @@ class DeviceConfig {
       o.humOn == humOn &&
       o.humOff == humOff &&
       o.postRunSec == postRunSec &&
-      o.maxPwm == maxPwm;
+      o.maxPwm == maxPwm &&
+      o.smokeOn == smokeOn &&
+      o.smokeOff == smokeOff;
 }
 
 String durationText(int s) {
@@ -138,6 +150,8 @@ class _SettingsPageState extends State<SettingsPage> {
               'hum_off': e.humOff,
               'post_run_sec': e.postRunSec,
               'max_pwm': e.maxPwm,
+              'smoke_on': e.smokeOn,
+              'smoke_off': e.smokeOff,
             }),
           )
           .timeout(const Duration(seconds: 8));
@@ -169,7 +183,8 @@ class _SettingsPageState extends State<SettingsPage> {
         title: const Text('Kembalikan ke bawaan?'),
         content: Text(
           'Fan menyala di atas ${d.humOn.round()} %, mati di bawah ${d.humOff.round()} %, '
-          'post-run ${durationText(d.postRunSec)}, kecepatan maksimum ${d.maxPwm} %.',
+          'post-run ${durationText(d.postRunSec)}, kecepatan maksimum ${d.maxPwm} %, '
+          'asap menyala di atas ${d.smokeOn}, bersih di bawah ${d.smokeOff}.',
         ),
         actions: [
           TextButton(
@@ -501,6 +516,7 @@ class _SettingsPageState extends State<SettingsPage> {
       final d = _defaults!;
       final changed = !e.same(_saved);
       final gapOk = e.humOn - e.humOff >= 5;
+      final smokeGapOk = e.smokeOn - e.smokeOff >= 50;
       final atDefault = !changed && e.same(d);
       final prMax = e.postRunSec > 600 ? 3600.0 : 600.0;
 
@@ -556,9 +572,41 @@ class _SettingsPageState extends State<SettingsPage> {
           divisions: 14,
           onChanged: (v) => setState(() => _edit = e.copyWith(maxPwm: v.round())),
         ),
+        
+        const SizedBox(height: 12),
+        _tile(
+          title: 'Asap menyala di atas',
+          valueText: '${e.smokeOn}',
+          hint: 'Kenaikan bacaan MQ-2 di atas udara bersih. Makin kecil makin peka. Bawaan ${d.smokeOn}.',
+          value: e.smokeOn.toDouble(),
+          min: 100,
+          max: 1000,
+          divisions: 18,
+          onChanged: (v) => setState(() => _edit = e.copyWith(smokeOn: v.round())),
+        ),
+        const SizedBox(height: 12),
+        _tile(
+          title: 'Asap dianggap bersih di bawah',
+          valueText: '${e.smokeOff}',
+          hint: 'Fan baru berhenti setelah bacaan di bawah ini selama 1 menit. Bawaan ${d.smokeOff}.',
+          value: e.smokeOff.toDouble(),
+          min: 30,
+          max: 500,
+          divisions: 47,
+          onChanged: (v) => setState(() => _edit = e.copyWith(smokeOff: v.round())),
+        ),
+        if (!smokeGapOk)
+          const Padding(
+            padding: EdgeInsets.only(top: 8),
+            child: Text(
+              'Selisih ambang asap menyala dan bersih minimal 50.',
+              style: TextStyle(color: Color(0xFFF87171), fontSize: 13),
+            ),
+          ),
+
         const SizedBox(height: 20),
         FilledButton(
-          onPressed: (_busy || !changed || !gapOk) ? null : _save,
+          onPressed: (_busy || !changed || !gapOk || !smokeGapOk) ? null : _save,
           style: FilledButton.styleFrom(
             backgroundColor: kAccent,
             foregroundColor: const Color(0xFF08213F),

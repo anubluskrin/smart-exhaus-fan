@@ -34,7 +34,31 @@ unsigned long lastRead = 0;
 unsigned long lastPublish = 0;
 int currentSpeed = 0;
 bool relayOn = false;
+
+// ===== Deteksi asap (MQ-2) =====
+#define MQ_PIN 34
+const unsigned long MQ_WARMUP_MS = 180000;   // 10 menit (untuk uji cepat: 180000)
+float SMOKE_ON_DELTA = 250;                  // kenaikan di atas level dasar untuk menyalakan
+float SMOKE_OFF_DELTA = 100;                 // di bawah ini dianggap bersih
+const unsigned long SMOKE_CLEAR_MS = 60000;  // bersih harus bertahan 1 menit
+float mqAvg = 0, mqBase = 0, smokeDelta = 0;
+bool mqInit = false;
+bool smokeAlert = false;
+unsigned long smokeClearStart = 0;
+
 float lastHum = 0, lastTemp = 0;
+
+// Fallback offline
+bool wasWifi = false;
+int wifiAttemptIdx = 0;
+unsigned long lastWifiAttempt = 0;
+unsigned long lastMqttAttempt = 0;
+unsigned long lastMqttOk = 0;
+const unsigned long RECONNECT_INTERVAL_MS = 15000;
+const unsigned long MANUAL_OFFLINE_REVERT_MS = 600000;   // 10 menit
+unsigned long lastValidRead = 0;
+const unsigned long SENSOR_TIMEOUT_MS = 120000;          // 2 menit
+bool sensorOk = true;
 
 // Mode kontrol
 bool manualMode = false;
@@ -128,12 +152,69 @@ bool standbyIsActive() {
   return standbyActive && (millis() - lastStandbyMsg < STANDBY_TIMEOUT_MS);
 }
 
+void updateSmoke() {
+  long sum = 0;
+  for (int i = 0; i < 16; i++) { sum += analogRead(MQ_PIN); delay(5); }
+  float v = sum / 16.0;
+  if (!mqInit) { mqAvg = v; mqBase = v; mqInit = true; }
+  mqAvg += (v - mqAvg) * 0.3;
+
+  // Level dasar: selama pemanasan ikut bacaan ke dua arah; sesudahnya turun cepat,
+  // naik sangat pelan, dan beku saat ada asap.
+  if (millis() < MQ_WARMUP_MS) {
+    mqBase += (mqAvg - mqBase) * 0.2;
+  } else if (mqAvg < mqBase) {
+    mqBase += (mqAvg - mqBase) * 0.1;
+  } else if (!smokeAlert && (mqAvg - mqBase) < SMOKE_ON_DELTA) {
+    mqBase += (mqAvg - mqBase) * 0.002;
+  }
+  smokeDelta = mqAvg - mqBase;
+
+  static int c = 0;
+  if (++c % 5 == 0) {
+    Serial.printf("MQ rata=%.0f dasar=%.0f delta=%.0f alert=%d\n", mqAvg, mqBase, smokeDelta, smokeAlert);
+  }
+
+  unsigned long now = millis();
+  if (now < MQ_WARMUP_MS) { smokeAlert = false; return; }   // masih pemanasan
+
+  if (!smokeAlert) {
+    if (smokeDelta > SMOKE_ON_DELTA) {
+      smokeAlert = true;
+      smokeClearStart = 0;
+      Serial.println("ASAP terdeteksi");
+    }
+  } else if (smokeDelta < SMOKE_OFF_DELTA) {
+    if (smokeClearStart == 0) smokeClearStart = now;
+    else if (now - smokeClearStart >= SMOKE_CLEAR_MS) {
+      smokeAlert = false;
+      Serial.println("Asap hilang");
+      // Kelembapan tinggi: lanjut RUNNING. Selain itu: post-run lalu IDLE.
+      if (lastHum > HUM_ON) {
+        state = RUNNING;
+      } else {
+        state = POSTRUN;
+        postrunStart = millis();
+      }
+    }
+  } else {
+    smokeClearStart = 0;
+  }
+}
+
 void updateControl(float h) {
   int speed = 0;
 
     if (!powerOn) {
     currentSpeed = 0;
     setFanSpeed(0);
+    return;
+  }
+
+    if (smokeAlert) {
+    state = RUNNING;   // setelah asap hilang, logika kelembapan yang menentukan kapan berhenti
+    currentSpeed = MAX_PWM;
+    setFanSpeed(MAX_PWM);
     return;
   }
 
@@ -177,6 +258,7 @@ void updateControl(float h) {
 }
 
 void publishTelemetry() {
+  if (!mqtt.connected()) return;
   JsonDocument doc;
   doc["hum"] = round(lastHum * 10) / 10.0;
   doc["temp"] = round(lastTemp * 10) / 10.0;
@@ -185,11 +267,16 @@ void publishTelemetry() {
   doc["power"] = powerOn;
   doc["standby"] = standbyIsActive();
   doc["relay"] = relayOn;
+  doc["smoke"] = (int)round(smokeDelta);
+  doc["smoke_alert"] = smokeAlert;
+  doc["smoke_ready"] = millis() > MQ_WARMUP_MS;
+  doc["sensor"] = sensorOk;
   doc["state"] = !powerOn ? "OFF"
+               : (smokeAlert ? "ASAP"
                : (standbyIsActive() ? "STANDBY"
-               : (manualMode ? "MANUAL" : stateName(state)));
+               : (manualMode ? "MANUAL" : stateName(state))));
 
-  char buf[200];
+  char buf[256];
   serializeJson(doc, buf);
   mqtt.publish(topicTelemetry.c_str(), buf);
   Serial.printf("Terkirim: %s\n", buf);
@@ -262,12 +349,26 @@ void onMessage(char* topic, byte* payload, unsigned int length) {
       Serial.println("Konfigurasi ditolak: nilai di luar batas");
       return;
     }
+    
+    float soN = SMOKE_ON_DELTA, soF = SMOKE_OFF_DELTA;
+    if (doc["smoke_on"].is<int>() && doc["smoke_off"].is<int>()) {
+      soN = doc["smoke_on"].as<int>();
+      soF = doc["smoke_off"].as<int>();
+      if (soF < 30 || soN < 100 || soN > 1000 || soN - soF < 50) {
+        Serial.println("Konfigurasi asap ditolak: nilai di luar batas");
+        return;
+      }
+    }
+    SMOKE_ON_DELTA = soN;
+    SMOKE_OFF_DELTA = soF;
+
     HUM_ON = on;
     HUM_OFF = off;
     POSTRUN_MS = (unsigned long)pr * 1000UL;
     MAX_PWM = mp;
     Serial.printf("Konfigurasi: on=%.0f off=%.0f postrun=%ld dtk max=%d%%\n",
                   HUM_ON, HUM_OFF, pr, MAX_PWM);
+    Serial.printf("Ambang asap: menyala=%.0f bersih=%.0f\n", SMOKE_ON_DELTA, SMOKE_OFF_DELTA);
     return;
 
   } else {
@@ -278,6 +379,57 @@ void onMessage(char* topic, byte* payload, unsigned int length) {
   publishTelemetry();
 }
 
+void applyDns() {
+  // DNS router tidak menjawab di sebagian jaringan, jadi pakai DNS publik.
+  WiFi.config(WiFi.localIP(), WiFi.gatewayIP(), WiFi.subnetMask(),
+              IPAddress(8, 8, 8, 8), IPAddress(1, 1, 1, 1));
+}
+
+void trackWifiState() {
+  bool nowOn = (WiFi.status() == WL_CONNECTED);
+  if (nowOn && !wasWifi) {
+    applyDns();
+    Serial.println("WiFi tersambung");
+  } else if (!nowOn && wasWifi) {
+    Serial.println("WiFi putus, fan tetap bekerja dari sensor");
+  }
+  wasWifi = nowOn;
+}
+
+void maintainWifi() {
+  if (WiFi.status() == WL_CONNECTED) return;
+  unsigned long now = millis();
+  if (lastWifiAttempt != 0 && now - lastWifiAttempt < RECONNECT_INTERVAL_MS) return;
+  lastWifiAttempt = now;
+
+  String s = savedSsid();
+  String p = savedPass();
+  bool useSaved = s.length() > 0 && (wifiAttemptIdx % 2 == 0);
+  wifiAttemptIdx++;
+  Serial.printf("Mencoba WiFi: %s\n", useSaved ? s.c_str() : WIFI_SSID);
+  WiFi.disconnect();
+  if (useSaved) WiFi.begin(s.c_str(), p.c_str());
+  else WiFi.begin(WIFI_SSID, WIFI_PASS);
+}
+
+void maintainMqtt() {
+  if (mqtt.connected()) return;
+  if (WiFi.status() != WL_CONNECTED) return;
+  unsigned long now = millis();
+  if (lastMqttAttempt != 0 && now - lastMqttAttempt < RECONNECT_INTERVAL_MS) return;
+  lastMqttAttempt = now;
+
+  Serial.print("Menyambung MQTT... ");
+  String clientId = String("esp32-") + DEVICE_ID;
+  if (mqtt.connect(clientId.c_str(), MQTT_USER, MQTT_PASS)) {
+    Serial.println("terhubung");
+    mqtt.subscribe(topicCmdAll.c_str());
+    Serial.printf("Berlangganan: %s\n", topicCmdAll.c_str());
+  } else {
+    Serial.printf("gagal, rc=%d\n", mqtt.state());
+  }
+}
+
 void setup() {
   Serial.begin(115200);
     // Relay terbuka dulu sebelum pin dijadikan output, supaya fan tidak menyala saat boot.
@@ -285,6 +437,8 @@ void setup() {
   pinMode(RELAY_PIN, OUTPUT);
   
   dht.begin();
+  analogReadResolution(12);
+  analogSetPinAttenuation(MQ_PIN, ADC_11db);
   ledcAttach(FAN_PIN, PWM_FREQ, PWM_RES);
 
   String base = String("bathfan/") + DEVICE_ID;
@@ -297,35 +451,60 @@ void setup() {
   topicCmdConfig = base + "/cmd/config";
 
   checkWifiResetButton();
-  connectWifiSmart();
-  // DNS router tidak menjawab di sebagian jaringan, jadi pakai DNS publik.
-  WiFi.config(WiFi.localIP(), WiFi.gatewayIP(), WiFi.subnetMask(),
-              IPAddress(8, 8, 8, 8), IPAddress(1, 1, 1, 1));
+  if (connectWifiSmart()) {
+    applyDns();
+    wasWifi = true;
+  } else {
+    Serial.println("Mode offline: fan tetap bekerja dari sensor, WiFi dicoba lagi berkala");
+  }
               
   net.setInsecure();   // sementara untuk pengembangan, diperketat di Tahap 8
   mqtt.setServer(MQTT_HOST, MQTT_PORT);
   mqtt.setBufferSize(512);
+  mqtt.setSocketTimeout(5);
   mqtt.setCallback(onMessage);
 }
 
 void loop() {
-  if (WiFi.status() != WL_CONNECTED) connectWifi();
-  if (!mqtt.connected()) connectMqtt();
-  mqtt.loop();
-
   unsigned long now = millis();
+
+  trackWifiState();
+  maintainWifi();
+  maintainMqtt();
+  if (mqtt.connected()) {
+    mqtt.loop();
+    lastMqttOk = now;
+  }
+
+  // Offline lama di mode Manual: kembali ke Auto, karena tidak ada yang bisa mengubahnya.
+  if (manualMode && !mqtt.connected() && now - lastMqttOk > MANUAL_OFFLINE_REVERT_MS) {
+    manualMode = false;
+    state = IDLE;
+    Serial.println("Offline lama: kembali ke mode Auto");
+  }
 
   if (now - lastRead >= READ_INTERVAL_MS) {
     lastRead = now;
+    updateSmoke();
     float h = dht.readHumidity();
     float t = dht.readTemperature();
     if (isnan(h) || isnan(t)) {
       Serial.println("Gagal membaca sensor");
+      if (smokeAlert) updateControl(lastHum);   // asap tetap dijaga walau DHT gagal
     } else {
+      lastValidRead = now;
       lastHum = h;
       lastTemp = t;
       updateControl(h);
     }
+  }
+
+  // Sensor mati lebih dari 2 menit: kelembapan tidak diketahui, jadi fan dimatikan.
+  sensorOk = (now - lastValidRead < SENSOR_TIMEOUT_MS);
+  if (!sensorOk && powerOn && (!manualMode || standbyIsActive())) {
+    state = IDLE;
+    currentSpeed = 0;
+    setFanSpeed(0);
   }
 
   if (now - lastPublish >= PUBLISH_INTERVAL_MS) {
