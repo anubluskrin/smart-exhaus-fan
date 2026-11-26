@@ -6,6 +6,14 @@
 #include <time.h>
 #include "secrets.h"
 #include "wifi_setup.h"
+#include "smoke_alarm.h"
+#ifndef BATHFAN_DEMO_ENABLED
+#define BATHFAN_DEMO_ENABLED 0
+#endif
+#if BATHFAN_DEMO_ENABLED
+#include <esp_system.h>
+#include "demo_session.h"
+#endif
 
 #define DHT_PIN 4
 #define DHT_TYPE DHT11
@@ -41,13 +49,22 @@ bool relayOn = false;
 const unsigned long MQ_WARMUP_MS = 180000;   // 10 menit (untuk uji cepat: 180000)
 float SMOKE_ON_DELTA = 250;                  // kenaikan di atas level dasar untuk menyalakan
 float SMOKE_OFF_DELTA = 100;                 // di bawah ini dianggap bersih
-const unsigned long SMOKE_CLEAR_MS = 60000;  // bersih harus bertahan 1 menit
 float mqAvg = 0, mqBase = 0, smokeDelta = 0;
 bool mqInit = false;
 bool smokeAlert = false;
-unsigned long smokeClearStart = 0;
+float physicalSmokeDelta = 0;
+SmokeAlarm physicalAlarm;
 
 float lastHum = 0, lastTemp = 0;
+#if BATHFAN_DEMO_ENABLED
+DemoSession demo;
+SmokeAlarm virtualAlarm;
+DemoPhase demoPhase = DemoPhase::Idle;
+float physicalHum = 0, physicalTemp = 0;
+bool hasValidDht = false;
+String topicCmdDemo;
+uint32_t demoConfigVersion = 1;
+#endif
 
 // Fallback offline
 bool wasWifi = false;
@@ -151,41 +168,22 @@ void updateSmoke() {
     mqBase += (mqAvg - mqBase) * 0.2;
   } else if (mqAvg < mqBase) {
     mqBase += (mqAvg - mqBase) * 0.1;
-  } else if (!smokeAlert && (mqAvg - mqBase) < SMOKE_ON_DELTA) {
+  } else if (!physicalAlarm.active && (mqAvg - mqBase) < SMOKE_ON_DELTA) {
     mqBase += (mqAvg - mqBase) * 0.002;
   }
-  smokeDelta = mqAvg - mqBase;
+  physicalSmokeDelta = mqAvg - mqBase;
 
   static int c = 0;
   if (++c % 5 == 0) {
-    Serial.printf("MQ rata=%.0f dasar=%.0f delta=%.0f alert=%d\n", mqAvg, mqBase, smokeDelta, smokeAlert);
+    Serial.printf("MQ rata=%.0f dasar=%.0f delta=%.0f alert=%d\n", mqAvg, mqBase, physicalSmokeDelta, physicalAlarm.active);
   }
 
-  unsigned long now = millis();
-  if (now < MQ_WARMUP_MS) { smokeAlert = false; return; }   // masih pemanasan
+}
 
-  if (!smokeAlert) {
-    if (smokeDelta > SMOKE_ON_DELTA) {
-      smokeAlert = true;
-      smokeClearStart = 0;
-      Serial.println("ASAP terdeteksi");
-    }
-  } else if (smokeDelta < SMOKE_OFF_DELTA) {
-    if (smokeClearStart == 0) smokeClearStart = now;
-    else if (now - smokeClearStart >= SMOKE_CLEAR_MS) {
-      smokeAlert = false;
-      Serial.println("Asap hilang");
-      // Kelembapan tinggi: lanjut RUNNING. Selain itu: post-run lalu IDLE.
-      if (lastHum > HUM_ON) {
-        state = RUNNING;
-      } else {
-        state = POSTRUN;
-        postrunStart = millis();
-      }
-    }
-  } else {
-    smokeClearStart = 0;
-  }
+void continueAfterSmoke(float humidity, uint32_t now) {
+  // Kelembapan tinggi: lanjut RUNNING. Selain itu: post-run lalu IDLE.
+  state = humidity > HUM_ON ? RUNNING : POSTRUN;
+  if (state == POSTRUN) postrunStart = now;
 }
 
 void updateControl(float h) {
@@ -243,6 +241,106 @@ void updateControl(float h) {
   setFanSpeed(speed);
 }
 
+#if BATHFAN_DEMO_ENABLED
+uint32_t nextDemoGeneration() {
+  uint32_t value;
+  do { value = esp_random(); } while (value == demo.generation);
+  return value;
+}
+
+const char* demoPhaseName(DemoPhase phase) {
+  switch (phase) {
+    case DemoPhase::Shower: return "shower";
+    case DemoPhase::Recovery: return "recovery";
+    case DemoPhase::Smoking: return "smoking";
+    case DemoPhase::Settling: return "settling";
+    default: return "idle";
+  }
+}
+
+void applyVirtualSample(uint32_t now) {
+  const DemoSample sample = sampleScenario(demo.preset, demo.elapsed(now));
+  lastHum = sample.humidity;
+  lastTemp = sample.temperature;
+  smokeDelta = sample.smokeDelta;
+  demoPhase = sample.phase;
+  if (virtualAlarm.update(smokeDelta, true, SMOKE_ON_DELTA, SMOKE_OFF_DELTA, now)) {
+    continueAfterSmoke(lastHum, now);
+  }
+  smokeAlert = virtualAlarm.active;
+  updateControl(lastHum);
+}
+
+void restorePhysical(uint32_t now) {
+  demoPhase = DemoPhase::Idle;
+  virtualAlarm = {};
+  state = IDLE;
+  postrunStart = 0;
+  lastHum = physicalHum;
+  lastTemp = physicalTemp;
+  smokeDelta = physicalSmokeDelta;
+  smokeAlert = physicalAlarm.active;
+  sensorOk = hasValidDht && now - lastValidRead < SENSOR_TIMEOUT_MS;
+  if (!sensorOk && !smokeAlert && (!manualMode || standbyIsActive())) {
+    currentSpeed = 0;
+    setFanSpeed(0);
+    return;
+  }
+  updateControl(lastHum);
+  // IDLE->RUNNING normally applies PWM on the next sensor tick.
+  if (state == RUNNING && currentSpeed == 0) updateControl(lastHum);
+}
+
+void finishDemo(const char* reason, uint32_t now) {
+  demo.finish(reason, nextDemoGeneration());
+  restorePhysical(now);
+}
+
+bool handleDemoCommand(const JsonDocument& doc) {
+  const time_t epoch = time(nullptr);
+  if (epoch < 1700000000L || !doc["expires_at"].is<uint32_t>() ||
+      !doc["generation"].is<uint32_t>() ||
+      !validDemoDeadline(static_cast<uint32_t>(epoch), doc["expires_at"].as<uint32_t>())) return false;
+  const char* op = doc["op"] | "";
+  const char* id = doc["run_id"] | "";
+  const uint32_t nonce = doc["generation"].as<uint32_t>();
+  const uint32_t now = millis();
+  if (strcmp(op, "stop") == 0) {
+    if (doc.size() != 4 || !demo.stop(id, nonce, nextDemoGeneration())) return false;
+    restorePhysical(now);
+    return true;
+  }
+  if (strcmp(op, "start") != 0 || !doc["speed"].is<uint8_t>()) return false;
+  DemoPreset preset;
+  preset.speed = doc["speed"].as<uint8_t>();
+  const char* kind = doc["kind"] | "";
+  if (strcmp(kind, "shower") == 0 && doc.size() == 7 && doc["minutes"].is<uint8_t>()) {
+    preset.minutes = doc["minutes"].as<uint8_t>();
+  } else if (strcmp(kind, "smoke") == 0 && doc.size() == 9 && doc["people"].is<uint8_t>()) {
+    preset.kind = DemoKind::Smoke;
+    preset.people = doc["people"].as<uint8_t>();
+    const char* intensity = doc["intensity"] | "";
+    if (!strcmp(intensity, "thin")) preset.intensity = DemoIntensity::Thin;
+    else if (!strcmp(intensity, "medium")) preset.intensity = DemoIntensity::Medium;
+    else if (!strcmp(intensity, "thick")) preset.intensity = DemoIntensity::Thick;
+    else return false;
+    const char* pattern = doc["pattern"] | "";
+    if (!strcmp(pattern, "staggered")) preset.pattern = DemoPattern::Staggered;
+    else if (strcmp(pattern, "together")) return false;
+  } else {
+    return false;
+  }
+  const bool ready = hasValidDht && now - lastValidRead < SENSOR_TIMEOUT_MS &&
+                     mqInit && now >= MQ_WARMUP_MS && !physicalAlarm.active;
+  if (!demo.start(preset, id, nonce, nextDemoGeneration(), now, ready)) return false;
+  state = IDLE;
+  postrunStart = 0;
+  virtualAlarm = {};
+  applyVirtualSample(now);
+  return true;
+}
+#endif
+
 void publishTelemetry() {
   if (!mqtt.connected()) return;
   JsonDocument doc;
@@ -262,9 +360,40 @@ void publishTelemetry() {
                : (standbyIsActive() ? "STANDBY"
                : (manualMode ? "MANUAL" : stateName(state))));
 
+#if BATHFAN_DEMO_ENABLED
+  JsonObject info = doc["demo"].to<JsonObject>();
+  info["v"] = 1;
+  info["generation"] = demo.generation;
+  info["phase"] = demoPhaseName(demoPhase);
+  if (demo.id[0]) info["run_id"] = demo.id;
+  if (demo.active) {
+    const DemoPreset& p = demo.preset;
+    info["kind"] = p.kind == DemoKind::Shower ? "shower" : "smoke";
+    info["speed"] = p.speed;
+    info["elapsed_s"] = demo.elapsed(millis()) / 1000;
+    info["config_version"] = demoConfigVersion;
+    info["hum_on"] = HUM_ON;
+    info["smoke_on"] = SMOKE_ON_DELTA;
+    if (p.kind == DemoKind::Shower) info["minutes"] = p.minutes;
+    else {
+      info["people"] = p.people;
+      info["intensity"] = p.intensity == DemoIntensity::Thin ? "thin"
+                        : p.intensity == DemoIntensity::Medium ? "medium" : "thick";
+      info["pattern"] = p.pattern == DemoPattern::Together ? "together" : "staggered";
+    }
+  } else if (demo.reason) {
+    info["end_reason"] = demo.reason;
+  }
+  char buf[768];
+#else
   char buf[256];
-  serializeJson(doc, buf);
-  mqtt.publish(topicTelemetry.c_str(), buf);
+#endif
+  const size_t bytes = measureJson(doc);
+  if (bytes >= sizeof(buf) || serializeJson(doc, buf) != bytes ||
+      !mqtt.publish(topicTelemetry.c_str(), buf)) {
+    Serial.println("Gagal menerbitkan telemetri");
+    return;
+  }
   Serial.printf("Terkirim: %s\n", buf);
 }
 
@@ -278,6 +407,12 @@ void onMessage(char* topic, byte* payload, unsigned int length) {
 
   String t = String(topic);
 
+#if BATHFAN_DEMO_ENABLED
+  if (t == topicCmdDemo) {
+    if (handleDemoCommand(doc)) publishTelemetry();
+    return;
+  }
+#endif
   if (t == topicCmdMode) {
     const char* m = doc["mode"] | "";
     if (strcmp(m, "manual") == 0) {
@@ -345,6 +480,10 @@ void onMessage(char* topic, byte* payload, unsigned int length) {
         return;
       }
     }
+#if BATHFAN_DEMO_ENABLED
+    if (HUM_ON != on || HUM_OFF != off || POSTRUN_MS != (unsigned long)pr * 1000UL ||
+        MAX_PWM != mp || SMOKE_ON_DELTA != soN || SMOKE_OFF_DELTA != soF) ++demoConfigVersion;
+#endif
     SMOKE_ON_DELTA = soN;
     SMOKE_OFF_DELTA = soF;
 
@@ -451,6 +590,10 @@ void setup() {
   topicCmdPower = base + "/cmd/power";
   topicCmdStandby = base + "/cmd/standby";
   topicCmdConfig = base + "/cmd/config";
+#if BATHFAN_DEMO_ENABLED
+  topicCmdDemo = base + "/cmd/demo";
+  demo.generation = nextDemoGeneration();
+#endif
 
   checkWifiResetButton();
   if (connectWifiSmart()) {
@@ -463,7 +606,11 @@ void setup() {
               
   net.setCACert(MQTT_CA_CERT);
   mqtt.setServer(MQTT_HOST, MQTT_PORT);
+#if BATHFAN_DEMO_ENABLED
+  if (!mqtt.setBufferSize(1024)) Serial.println("Buffer MQTT demo tidak tersedia");
+#else
   mqtt.setBufferSize(512);
+#endif
   mqtt.setSocketTimeout(5);
   mqtt.setCallback(onMessage);
 }
@@ -472,12 +619,25 @@ void loop() {
   unsigned long now = millis();
 
   trackWifiState();
+#if BATHFAN_DEMO_ENABLED
+  if (demo.active && (!mqtt.connected() || WiFi.status() != WL_CONNECTED)) {
+    finishDemo("disconnected", now);
+  }
+#endif
   maintainWifi();
   maintainMqtt();
   if (mqtt.connected()) {
     mqtt.loop();
     lastMqttOk = now;
   }
+  // MQTT callbacks may start a run after the initial loop timestamp.
+  now = millis();
+#if BATHFAN_DEMO_ENABLED
+  if (demo.active && (!mqtt.connected() || demo.expired(now))) {
+    finishDemo(mqtt.connected() ? "timeout" : "disconnected", now);
+    publishTelemetry();
+  }
+#endif
 
   // Offline lama di mode Manual: kembali ke Auto, karena tidak ada yang bisa mengubahnya.
   if (manualMode && !mqtt.connected() && now - lastMqttOk > MANUAL_OFFLINE_REVERT_MS) {
@@ -489,8 +649,41 @@ void loop() {
   if (now - lastRead >= READ_INTERVAL_MS) {
     lastRead = now;
     updateSmoke();
+    const bool smokeCleared = physicalAlarm.update(
+      physicalSmokeDelta, millis() >= MQ_WARMUP_MS, SMOKE_ON_DELTA, SMOKE_OFF_DELTA, now);
     float h = dht.readHumidity();
     float t = dht.readTemperature();
+#if BATHFAN_DEMO_ENABLED
+    if (isfinite(h) && isfinite(t)) {
+      lastValidRead = now;
+      physicalHum = h;
+      physicalTemp = t;
+      hasValidDht = true;
+    }
+    if (demo.active) {
+      if (physicalAlarm.active || now - lastValidRead >= SENSOR_TIMEOUT_MS) {
+        finishDemo(physicalAlarm.active ? "physical_alarm" : "sensor_fault", now);
+        publishTelemetry();
+      } else {
+        const DemoPhase previous = demoPhase;
+        const State previousState = state;
+        const bool previousAlarm = smokeAlert;
+        applyVirtualSample(now);
+        const bool autoControl = powerOn && !manualMode && !standbyIsActive();
+        if (previous == DemoPhase::Settling && !smokeAlert &&
+            (!autoControl || (state == IDLE && currentSpeed == 0))) {
+          finishDemo("completed", now);
+          publishTelemetry();
+        } else if (demoPhase != previous || state != previousState || smokeAlert != previousAlarm) {
+          publishTelemetry();
+        }
+      }
+    } else
+#endif
+    {
+    smokeDelta = physicalSmokeDelta;
+    smokeAlert = physicalAlarm.active;
+    if (smokeCleared) continueAfterSmoke(lastHum, now);
     if (isnan(h) || isnan(t)) {
       Serial.println("Gagal membaca sensor");
       if (smokeAlert) updateControl(lastHum);   // asap tetap dijaga walau DHT gagal
@@ -500,11 +693,12 @@ void loop() {
       lastTemp = t;
       updateControl(h);
     }
+    }
   }
 
   // Sensor mati lebih dari 2 menit: kelembapan tidak diketahui, jadi fan dimatikan.
   sensorOk = (now - lastValidRead < SENSOR_TIMEOUT_MS);
-  if (!sensorOk && powerOn && (!manualMode || standbyIsActive())) {
+  if (!sensorOk && !smokeAlert && powerOn && (!manualMode || standbyIsActive())) {
     state = IDLE;
     currentSpeed = 0;
     setFanSpeed(0);
