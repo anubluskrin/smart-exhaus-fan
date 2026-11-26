@@ -207,15 +207,17 @@ flutter test
 
 - **Build APK Pengunjung (Guest murni, tanpa akses Admin):**
   ```powershell
-  flutter build apk --release --dart-define=DEFAULT_BASE_URL=https://api-bazar.domain-anda.com
+  flutter build apk --release --split-per-abi --dart-define=DEFAULT_BASE_URL=https://api-bazar.domain-anda.com
   ```
 
 - **Build APK Tim (memiliki izin aktivasi Mode Admin ke satu origin tepercaya):**
   ```powershell
-  flutter build apk --release `
+  flutter build apk --release --split-per-abi `
     --dart-define=ADMIN_API_ORIGIN=https://api-bazar.domain-anda.com `
     --dart-define=DEFAULT_BASE_URL=https://api-bazar.domain-anda.com
   ```
+
+  Ambil satu APK dari `app/build/app/outputs/flutter-apk/`: `app-arm64-v8a-release.apk` untuk HP ARM64, `app-armeabi-v7a-release.apk` untuk Android ARM 32-bit, atau `app-x86_64-release.apk` untuk emulator x86-64. Cek ABI HP dengan `adb shell getprop ro.product.cpu.abilist`. Simpan APK Guest dan Tim di folder terpisah sebelum build varian berikutnya karena nama output sama. Build tanpa `ADMIN_API_ORIGIN` tidak dapat mengaktifkan mode Admin.
   > Jangan pernah memasukkan `API_KEY` ke `--dart-define`. Tim memasukkan kunci Admin secara manual di tab **Pengaturan** pada HP tim saja.
 
 ---
