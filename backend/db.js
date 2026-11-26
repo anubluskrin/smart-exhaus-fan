@@ -117,6 +117,19 @@ async function init(targetPool = pool, env = process.env) {
   await targetPool.query(
     'ALTER TABLE telemetry ADD COLUMN IF NOT EXISTS smoke_ready BOOLEAN'
   );
+  await targetPool.query(`
+    ALTER TABLE telemetry
+      ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'physical',
+      ADD COLUMN IF NOT EXISTS demo_run_id UUID,
+      ADD COLUMN IF NOT EXISTS demo_meta JSONB,
+      ADD COLUMN IF NOT EXISTS relay BOOLEAN,
+      ADD COLUMN IF NOT EXISTS standby BOOLEAN,
+      ADD COLUMN IF NOT EXISTS sensor_ok BOOLEAN
+  `);
+  await targetPool.query(`
+    CREATE INDEX IF NOT EXISTS idx_telemetry_demo_history
+      ON telemetry (device_id, source, demo_run_id, created_at)
+  `);
 
   await targetPool.query(`
     CREATE TABLE IF NOT EXISTS schedules (

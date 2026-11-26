@@ -5,6 +5,7 @@ const { pool: defaultPool, init, cleanupOldFeedback } = require('./db');
 const { startApi } = require('./api');
 const { startScheduler } = require('./scheduler');
 const { isAllowedDevice, validateStartupEnv } = require('./config');
+const { parseDemoTelemetry } = require('./demo_telemetry');
 
 const MAX_TELEMETRY_BYTES = 4096;
 const TELEMETRY_TOPIC_RE = /^bathfan\/([^/]+)\/telemetry$/;
@@ -13,8 +14,8 @@ const FEEDBACK_CLEANUP_MS = 6 * 60 * 60 * 1000;
 const INSERT_SQL = `
   INSERT INTO telemetry
     (device_id, humidity, temperature, fan_pwm, mode, state, power,
-     smoke, smoke_alert, smoke_ready)
-  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+     smoke, smoke_alert, smoke_ready, source, demo_run_id, demo_meta, relay, standby, sensor_ok)
+  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
 `;
 
 function parseTelemetryPayload(payload) {
@@ -95,6 +96,8 @@ function parseTelemetryPayload(payload) {
     return null;
   }
 
+  const demo = parseDemoTelemetry(data.demo);
+  if (!demo) return null;
   return {
     hum: data.hum,
     temp: data.temp,
@@ -105,6 +108,8 @@ function parseTelemetryPayload(payload) {
     smoke,
     smoke_alert: smokeAlert,
     smoke_ready: smokeReady,
+    ...(demo.meta ? { demo, relay: data.relay === true, standby: data.standby === true,
+      sensorOk: data.sensor === true } : {}),
   };
 }
 
@@ -134,6 +139,12 @@ async function handleTelemetryMessage(topic, payload, { pool = defaultPool, env 
       parsed.smoke,
       parsed.smoke_alert,
       parsed.smoke_ready,
+      parsed.demo?.source ?? 'physical',
+      parsed.demo?.runId ?? null,
+      parsed.demo?.meta ?? null,
+      parsed.relay ?? null,
+      parsed.standby ?? null,
+      parsed.sensorOk ?? null,
     ]);
     console.log(
       `Tersimpan [${deviceId}] hum=${parsed.hum} temp=${parsed.temp} pwm=${parsed.pwm} state=${parsed.state}`
@@ -188,9 +199,12 @@ async function main() {
     });
   });
 
-  client.on('message', (topic, payload) => {
-    handleTelemetryMessage(topic, payload, { pool: defaultPool, env: process.env });
-  });
+  // MQTT.js waits for this callback before reading the next packet. That
+  // keeps an idle/stop sample from racing an earlier active sample into DB.
+  client.handleMessage = (packet, done) => {
+    handleTelemetryMessage(packet.topic, packet.payload, { pool: defaultPool, env: process.env })
+      .then(() => done(), done);
+  };
 
   client.on('error', (err) => {
     console.error('Error MQTT:', err.message);

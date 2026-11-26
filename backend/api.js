@@ -1,6 +1,8 @@
 const express = require('express');
 const crypto = require('node:crypto');
 const { pool: defaultPool } = require('./db');
+const { isRunId } = require('./demo_telemetry');
+const { registerDemoRoutes } = require('./demo_routes');
 const {
   DEVICE_RE,
   getDefaultConfig,
@@ -22,7 +24,7 @@ const RANGES = {
 
 const LATEST_SQL = `
   SELECT humidity, temperature, fan_pwm, mode, state, power,
-         smoke, smoke_alert, smoke_ready, created_at
+         smoke, smoke_alert, smoke_ready, created_at, source, demo_meta, relay, standby, sensor_ok
   FROM telemetry
   WHERE device_id = $1
   ORDER BY id DESC
@@ -38,7 +40,8 @@ const HISTORY_SQL = `
     ROUND(AVG(smoke) FILTER (WHERE smoke_ready IS TRUE)::numeric)::int AS smoke,
     BOOL_OR(COALESCE(smoke_alert, false)) AS smoke_alert
   FROM telemetry
-  WHERE device_id = $1 AND created_at >= $2
+  WHERE device_id = $1 AND created_at >= $2 AND source = $4
+    AND demo_run_id IS NOT DISTINCT FROM $5::uuid
   GROUP BY 1
   ORDER BY 1
 `;
@@ -244,9 +247,11 @@ function createApp(mqttClient, { pool = defaultPool, env = process.env, nowFn = 
       }
       const row = rows[0];
       const ageSec = (nowFn() - new Date(row.created_at).getTime()) / 1000;
+      const { generation, ...publicDemo } = row.demo_meta ?? {};
       return res.json({
         device,
         online: ageSec < ONLINE_THRESHOLD_SEC,
+        ...(row.demo_meta ? { demo_available: startup.demoEnabled && ageSec < ONLINE_THRESHOLD_SEC } : {}),
         last_seen_sec_ago: Math.max(0, Math.round(ageSec)),
         latest: {
           humidity: row.humidity,
@@ -258,6 +263,10 @@ function createApp(mqttClient, { pool = defaultPool, env = process.env, nowFn = 
           smoke: row.smoke ?? null,
           smoke_alert: row.smoke_alert ?? false,
           smoke_ready: row.smoke_ready ?? false,
+          ...(row.demo_meta ? {
+            source: row.source, demo: publicDemo, relay: row.relay, standby: row.standby,
+            sensor_ok: row.sensor_ok,
+          } : {}),
           time: row.created_at,
         },
       });
@@ -270,8 +279,8 @@ function createApp(mqttClient, { pool = defaultPool, env = process.env, nowFn = 
   const historyCache = new Map(); // key -> { expiresAt, data }
   const historyInFlight = new Map(); // key -> Promise
 
-  async function fetchHistory(device, range) {
-    const key = `${device}:${range}`;
+  async function fetchHistory(device, range, source, runId) {
+    const key = `${device}:${range}:${source}:${runId ?? ''}`;
     const now = nowFn();
     const cached = historyCache.get(key);
     if (cached && cached.expiresAt > now) {
@@ -286,7 +295,7 @@ function createApp(mqttClient, { pool = defaultPool, env = process.env, nowFn = 
     const since = new Date(now - seconds * 1000);
 
     const promise = (async () => {
-      const { rows } = await pool.query(HISTORY_SQL, [device, since, bucket]);
+      const { rows } = await pool.query(HISTORY_SQL, [device, since, bucket, source, runId]);
       const data = { device, range, count: rows.length, points: rows };
       if (historyCache.size >= MAX_HISTORY_CACHE_ENTRIES) {
         const oldest = historyCache.keys().next().value;
@@ -316,9 +325,16 @@ function createApp(mqttClient, { pool = defaultPool, env = process.env, nowFn = 
     if (!Object.prototype.hasOwnProperty.call(RANGES, range)) {
       return res.status(400).json({ error: 'range harus 1h, 24h, atau 7d' });
     }
+    const source = req.query.source ?? 'physical';
+    const runId = req.query.run_id;
+    if ((source !== 'physical' && source !== 'demo') ||
+        (source === 'demo' ? !isRunId(runId) : runId !== undefined)) {
+      return res.status(400).json({ error: 'sumber atau ID skenario tidak valid' });
+    }
+    if (source === 'demo' && !isBazar) return res.status(404).json({ error: 'riwayat demo tidak tersedia' });
 
     try {
-      const payload = await fetchHistory(device, range);
+      const payload = await fetchHistory(device, range, source, runId ?? null);
       return res.json(payload);
     } catch (e) {
       console.error('Gagal membaca riwayat:', e.message);
@@ -453,6 +469,10 @@ function createApp(mqttClient, { pool = defaultPool, env = process.env, nowFn = 
 
   // Semua rute /api lain (dan seluruh rute /api di profil real) wajib kunci Admin
   app.use('/api', requireAdmin);
+  registerDemoRoutes(app, {
+    pool, mqttClient, enabled: startup.demoEnabled, nowFn, resolveDevice,
+    limiter: createWindowLimiter({ max: 6, windowMs: 60000, nowFn }),
+  });
 
   app.get('/api/admin/verify', (req, res) => {
     res.json({ ok: true, role: 'admin' });

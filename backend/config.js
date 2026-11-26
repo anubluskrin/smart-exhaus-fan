@@ -130,8 +130,14 @@ function validateStartupEnv(env = process.env) {
   if (apiKey.length < 24) {
     throw new Error('API_KEY di .env belum diisi atau kurang dari 24 karakter');
   }
+  const profile = getAppProfile(env);
+  const demoFlag = env.DEMO_SCENARIOS_ENABLED ?? 'false';
+  if (!['true', 'false'].includes(demoFlag) || (demoFlag === 'true' && profile !== 'bazar')) {
+    throw new Error('DEMO_SCENARIOS_ENABLED hanya boleh true pada profil bazar');
+  }
   return {
-    profile: getAppProfile(env),
+    profile,
+    demoEnabled: demoFlag === 'true',
     postRunSec: getDefaultPostRunSec(env),
     allowedDevices: getAllowedDevices(env),
     port: getPort(env),
