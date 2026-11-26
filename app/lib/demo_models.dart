@@ -42,6 +42,7 @@ class DemoSnapshot {
   final String phase, pattern;
   final int people, speed, elapsed;
   final int? configVersion;
+  final bool finalIdle;
   final num? humidityThreshold, smokeThreshold;
 
   const DemoSnapshot(
@@ -54,6 +55,7 @@ class DemoSnapshot {
     this.speed,
     this.elapsed, {
     this.configVersion,
+    this.finalIdle = false,
     this.humidityThreshold,
     this.smokeThreshold,
   });
@@ -74,6 +76,7 @@ class DemoSnapshot {
       raw['speed'] as int? ?? 1,
       raw['elapsed_s'] as int? ?? 0,
       configVersion: raw['config_version'] as int?,
+      finalIdle: raw['final_idle'] == true,
       humidityThreshold: raw['hum_on'] as num?,
       smokeThreshold: raw['smoke_on'] as num?,
     );
@@ -161,7 +164,7 @@ class DemoEvidence {
       ? 'Respons belum teramati'
       : 'Menunggu ambang';
 
-  String finish(String? reason) {
+  String finish(String? reason, {bool finalIdle = false}) {
     final missing = _missingReason;
     if (reason != 'completed') {
       return 'Tidak dinilai · skenario tidak selesai normal';
@@ -170,7 +173,7 @@ class DemoEvidence {
     if (!_crossed) return 'Tidak dinilai · ambang tidak teramati terlintasi';
     if (!_settled) return 'Tidak dinilai · fase akhir tidak terekam';
     if (!_response) return 'Gagal · respons tidak tercapai';
-    if (!_postRun || !_idle || (smokeRun && !_cleared)) {
+    if (!_postRun || !(_idle || finalIdle) || (smokeRun && !_cleared)) {
       return 'Tidak dinilai · pemulihan tidak terekam';
     }
     return 'Lulus · respons dan pemulihan teramati';

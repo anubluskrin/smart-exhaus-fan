@@ -7,6 +7,7 @@
 #include "secrets.h"
 #include "wifi_setup.h"
 #include "smoke_alarm.h"
+#include "fan_control.h"
 #ifndef BATHFAN_DEMO_ENABLED
 #define BATHFAN_DEMO_ENABLED 0
 #endif
@@ -36,7 +37,6 @@ const int MIN_SPEED = 30;
 const unsigned long READ_INTERVAL_MS = 2000;
 const unsigned long PUBLISH_INTERVAL_MS = 5000;
 
-enum State { IDLE, RUNNING, POSTRUN };
 State state = IDLE;
 unsigned long postrunStart = 0;
 unsigned long lastRead = 0;
@@ -59,11 +59,13 @@ float lastHum = 0, lastTemp = 0;
 #if BATHFAN_DEMO_ENABLED
 DemoSession demo;
 SmokeAlarm virtualAlarm;
+FanMemory physicalControl;
 DemoPhase demoPhase = DemoPhase::Idle;
 float physicalHum = 0, physicalTemp = 0;
 bool hasValidDht = false;
 String topicCmdDemo;
 uint32_t demoConfigVersion = 1;
+bool demoFinalIdle = false;
 #endif
 
 // Fallback offline
@@ -84,7 +86,6 @@ int manualSpeed = 0;
 bool powerOn = true;
 bool standbyActive = false;
 unsigned long lastStandbyMsg = 0;
-const float HUM_CRITICAL = 90.0;
 const unsigned long STANDBY_TIMEOUT_MS = 180000;
 
 DHT dht(DHT_PIN, DHT_TYPE);
@@ -107,11 +108,6 @@ void setFanSpeed(int percent) {
   percent = constrain(percent, 0, 100);
   relayWrite(percent > 0);   // relay menutup hanya saat fan harus berputar
   ledcWrite(FAN_PIN, map(percent, 0, 100, 0, 255));
-}
-
-int humidityToSpeed(float h) {
-  int s = map((long)h, (long)HUM_OFF, 90, MIN_SPEED, 100);
-  return constrain(s, MIN_SPEED, MAX_PWM);
 }
 
 const char* stateName(State s) {
@@ -186,60 +182,20 @@ void continueAfterSmoke(float humidity, uint32_t now) {
   if (state == POSTRUN) postrunStart = now;
 }
 
-void updateControl(float h) {
-  int speed = 0;
-
-    if (!powerOn) {
-    currentSpeed = 0;
-    setFanSpeed(0);
-    return;
-  }
-
-    if (smokeAlert) {
-    state = RUNNING;   // setelah asap hilang, logika kelembapan yang menentukan kapan berhenti
-    currentSpeed = MAX_PWM;
-    setFanSpeed(MAX_PWM);
-    return;
-  }
-
-    if (standbyIsActive()) {
-    state = IDLE;
-    speed = (h >= HUM_CRITICAL) ? humidityToSpeed(h) : 0;
-    currentSpeed = speed;
-    setFanSpeed(speed);
-    return;
-  }
-
-  if (manualMode) {
-    speed = min(manualSpeed, MAX_PWM);
-  } else {
-    switch (state) {
-      case IDLE:
-        speed = 0;
-        if (h > HUM_ON) state = RUNNING;
-        break;
-      case RUNNING:
-        speed = humidityToSpeed(h);
-        if (h < HUM_OFF) {
-          state = POSTRUN;
-          postrunStart = millis();
-        }
-        break;
-      case POSTRUN:
-        speed = MIN_SPEED;
-        if (h > HUM_ON) {
-          state = RUNNING;
-        } else if (millis() - postrunStart >= POSTRUN_MS) {
-          state = IDLE;
-          speed = 0;
-        }
-        break;
-    }
-  }
-
-  currentSpeed = speed;
-  setFanSpeed(speed);
+FanPolicy fanPolicy() {
+  return {HUM_ON, HUM_OFF, MAX_PWM, MIN_SPEED, static_cast<uint32_t>(POSTRUN_MS)};
 }
+
+void applyFanControl(float h, bool immediateRising) {
+  FanMemory memory{state, static_cast<uint32_t>(postrunStart)};
+  currentSpeed = fanControlStep(memory, fanPolicy(), h, millis(), powerOn, smokeAlert,
+                               standbyIsActive(), manualMode, manualSpeed, immediateRising);
+  state = memory.state;
+  postrunStart = memory.postrunStart;
+  setFanSpeed(currentSpeed);
+}
+
+void updateControl(float h) { applyFanControl(h, false); }
 
 #if BATHFAN_DEMO_ENABLED
 uint32_t nextDemoGeneration() {
@@ -274,24 +230,25 @@ void applyVirtualSample(uint32_t now) {
 void restorePhysical(uint32_t now) {
   demoPhase = DemoPhase::Idle;
   virtualAlarm = {};
-  state = IDLE;
-  postrunStart = 0;
+  state = physicalControl.state;
+  postrunStart = physicalControl.postrunStart;
   lastHum = physicalHum;
   lastTemp = physicalTemp;
   smokeDelta = physicalSmokeDelta;
   smokeAlert = physicalAlarm.active;
   sensorOk = hasValidDht && now - lastValidRead < SENSOR_TIMEOUT_MS;
   if (!sensorOk && !smokeAlert && (!manualMode || standbyIsActive())) {
+    state = IDLE;
     currentSpeed = 0;
     setFanSpeed(0);
     return;
   }
-  updateControl(lastHum);
-  // IDLE->RUNNING normally applies PWM on the next sensor tick.
-  if (state == RUNNING && currentSpeed == 0) updateControl(lastHum);
+  applyFanControl(lastHum, true);
 }
 
 void finishDemo(const char* reason, uint32_t now) {
+  demoFinalIdle = strcmp(reason, "completed") == 0 && state == IDLE &&
+                  currentSpeed == 0 && powerOn && !manualMode && !standbyIsActive();
   demo.finish(reason, nextDemoGeneration());
   restorePhysical(now);
 }
@@ -305,8 +262,13 @@ bool handleDemoCommand(const JsonDocument& doc) {
   const char* id = doc["run_id"] | "";
   const uint32_t nonce = doc["generation"].as<uint32_t>();
   const uint32_t now = millis();
+  if (demo.expired(now)) {
+    finishDemo("timeout", now);
+    return true;
+  }
   if (strcmp(op, "stop") == 0) {
     if (doc.size() != 4 || !demo.stop(id, nonce, nextDemoGeneration())) return false;
+    demoFinalIdle = false;
     restorePhysical(now);
     return true;
   }
@@ -333,6 +295,8 @@ bool handleDemoCommand(const JsonDocument& doc) {
   const bool ready = hasValidDht && now - lastValidRead < SENSOR_TIMEOUT_MS &&
                      mqInit && now >= MQ_WARMUP_MS && !physicalAlarm.active;
   if (!demo.start(preset, id, nonce, nextDemoGeneration(), now, ready)) return false;
+  demoFinalIdle = false;
+  physicalControl = {state, static_cast<uint32_t>(postrunStart)};
   state = IDLE;
   postrunStart = 0;
   virtualAlarm = {};
@@ -383,6 +347,7 @@ void publishTelemetry() {
     }
   } else if (demo.reason) {
     info["end_reason"] = demo.reason;
+    if (demoFinalIdle) info["final_idle"] = true;
   }
   char buf[768];
 #else
@@ -420,6 +385,9 @@ void onMessage(char* topic, byte* payload, unsigned int length) {
     } else if (strcmp(m, "auto") == 0) {
       manualMode = false;
       state = IDLE;
+#if BATHFAN_DEMO_ENABLED
+      if (demo.active) physicalControl = {};
+#endif
     } else {
       Serial.println("Perintah ditolak: mode harus auto atau manual");
       return;
@@ -440,7 +408,12 @@ void onMessage(char* topic, byte* payload, unsigned int length) {
       return;
     }
     powerOn = doc["on"].as<bool>();
-    if (!powerOn) state = IDLE;
+    if (!powerOn) {
+      state = IDLE;
+#if BATHFAN_DEMO_ENABLED
+      if (demo.active) physicalControl = {};
+#endif
+    }
     Serial.printf("Daya: %s\n", powerOn ? "ON" : "OFF");
 
     } else if (t == topicCmdStandby) {
@@ -564,8 +537,18 @@ void maintainMqtt() {
   String clientId = String("esp32-") + DEVICE_ID;
   if (mqtt.connect(clientId.c_str(), MQTT_USER, MQTT_PASS)) {
     Serial.println("terhubung");
+#if BATHFAN_DEMO_ENABLED
+    if (!(mqtt.subscribe(topicCmdMode.c_str()) && mqtt.subscribe(topicCmdSpeed.c_str()) &&
+          mqtt.subscribe(topicCmdPower.c_str()) && mqtt.subscribe(topicCmdStandby.c_str()) &&
+          mqtt.subscribe(topicCmdConfig.c_str()) && mqtt.subscribe(topicCmdDemo.c_str(), 1))) {
+      mqtt.disconnect();
+      Serial.println("Gagal berlangganan perintah demo");
+      return;
+    }
+#else
     mqtt.subscribe(topicCmdAll.c_str());
     Serial.printf("Berlangganan: %s\n", topicCmdAll.c_str());
+#endif
   } else {
     Serial.printf("gagal, rc=%d (kontrol lokal tetap aktif)\n", mqtt.state());
   }
@@ -626,11 +609,6 @@ void loop() {
 #endif
   maintainWifi();
   maintainMqtt();
-  if (mqtt.connected()) {
-    mqtt.loop();
-    lastMqttOk = now;
-  }
-  // MQTT callbacks may start a run after the initial loop timestamp.
   now = millis();
 #if BATHFAN_DEMO_ENABLED
   if (demo.active && (!mqtt.connected() || demo.expired(now))) {
@@ -661,6 +639,14 @@ void loop() {
       hasValidDht = true;
     }
     if (demo.active) {
+      if (smokeCleared) {
+        physicalControl.state = physicalHum > HUM_ON ? RUNNING : POSTRUN;
+        if (physicalControl.state == POSTRUN) physicalControl.postrunStart = now;
+      }
+      if ((isfinite(h) && isfinite(t)) || physicalAlarm.active) {
+        fanControlStep(physicalControl, fanPolicy(), physicalHum, now, powerOn, physicalAlarm.active,
+                       standbyIsActive(), manualMode, manualSpeed);
+      }
       if (physicalAlarm.active || now - lastValidRead >= SENSOR_TIMEOUT_MS) {
         finishDemo(physicalAlarm.active ? "physical_alarm" : "sensor_fault", now);
         publishTelemetry();
@@ -707,5 +693,10 @@ void loop() {
   if (now - lastPublish >= PUBLISH_INTERVAL_MS) {
     lastPublish = now;
     publishTelemetry();
+  }
+  // Apply due physical samples and terminal decisions before demo commands.
+  if (mqtt.connected()) {
+    mqtt.loop();
+    lastMqttOk = millis();
   }
 }

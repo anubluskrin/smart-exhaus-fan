@@ -464,7 +464,7 @@ class _DashboardPageState extends State<DashboardPage> {
       }
     }
     if (status.online && run?.endReason != null && run?.id == _demoEvidence?.runId) {
-      _demoVerdict = _demoEvidence?.finish(run?.endReason);
+      _demoVerdict = _demoEvidence?.finish(run?.endReason, finalIdle: run?.finalIdle == true);
       _demoEvidence = null;
     }
     if (pending == null || run == null || !status.online) return;

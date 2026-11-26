@@ -15,7 +15,7 @@ inline bool validDemoId(const char* id) {
 }
 
 inline bool validDemoDeadline(uint32_t now, uint32_t expiry) {
-  return now != 0 && expiry >= now && expiry - now <= 10;
+  return now != 0 && expiry > now && expiry - now <= 10;
 }
 
 struct DemoSession {

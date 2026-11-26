@@ -1,5 +1,6 @@
 #include <cassert>
 #include "../bathfan/demo_session.h"
+#include "../bathfan/fan_control.h"
 
 int main() {
   DemoSession run;
@@ -21,6 +22,7 @@ int main() {
   assert(!run.expired(1800299));
   assert(run.expired(1800300));
   assert(!validDemoDeadline(100, 99));
+  assert(!validDemoDeadline(100, 100));
   assert(!validDemoDeadline(100, 111));
   assert(validDemoDeadline(100, 110));
   assert(!validDemoDeadline(0, 10));
@@ -37,4 +39,11 @@ int main() {
   assert(!alarm.update(99, true, 250, 100, 119003));
   assert(alarm.update(99, true, 250, 100, 119004));
   assert(!alarm.active);
+  const FanPolicy policy{70, 60, 100, 30, 60000};
+  FanMemory physical{RUNNING, 0};
+  assert(fanControlStep(physical, policy, 65, 10, true, false, false, false, 0) > 0);
+  assert(physical.state == RUNNING);
+  FanMemory fresh{};
+  assert(fanControlStep(fresh, policy, 80, 10, true, false, false, false, 0, true) > 0);
+  assert(fanControlStep(fresh, policy, 80, 11, false, true, false, false, 0, true) == 0);
 }

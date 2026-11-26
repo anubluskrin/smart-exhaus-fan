@@ -48,4 +48,41 @@ void main() {
     expect(find.text('Koneksi terputus'), findsOneWidget);
     expect(find.text('Sensor simulasi · Fan fisik'), findsOneWidget);
   });
+
+  testWidgets(
+    'reduced motion keeps online scene readable without a running ticker',
+    (tester) async {
+      final s = DemoSnapshot.fromJson({
+        'v': 1,
+        'run_id': 'example',
+        'kind': 'smoke',
+        'phase': 'settling',
+      })!;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: MediaQuery(
+            data: const MediaQueryData(disableAnimations: true),
+            child: Scaffold(
+              body: DemoScene(
+                snapshot: s,
+                humidity: 55,
+                smokeDelta: 5,
+                smokeAlert: true,
+                fanPwm: 0,
+                online: true,
+                isActive: true,
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle(
+        const Duration(milliseconds: 50),
+        EnginePhase.sendSemanticsUpdate,
+        const Duration(milliseconds: 500),
+      );
+      expect(find.text('Menunggu udara bersih'), findsOneWidget);
+      expect(find.text('PWM dilaporkan: 0%'), findsOneWidget);
+    },
+  );
 }

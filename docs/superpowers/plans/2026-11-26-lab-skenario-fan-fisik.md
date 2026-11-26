@@ -108,6 +108,8 @@
 ## Catatan eksekusi
 
 - Dua test C++ host lulus. Test Flutter mencakup Guest yang membuka Dashboard saat demo sudah berjalan. Tes integrasi PostgreSQL 18 dijalankan pada cluster sementara dan membuktikan bucket fisik serta dua run terpisah. Suite harian menandai tes DB sebagai `skip` jika `BATHFAN_TEST_DATABASE_URL` tidak disediakan.
+- Arduino CLI 1.6.0 dan ESP32 core 3.3.12 berhasil mengompilasi build biasa dan demo untuk `esp32:esp32:esp32`, tanpa upload. Build demo memakai 83% ruang program pada skema partisi board uji.
 - Ruling: jalur MQTT ingest menunggu INSERT melalui callback `handleMessage` agar sampel terminal tidak tertukar dengan sampel aktif yang lebih lama.
 - Ruling: ESP32 demo melaporkan revisi konfigurasi dan ambang yang diterapkan; panel tidak menentukan lulus berdasarkan konfigurasi DB yang mungkin belum sampai ke perangkat.
+- Review akhir: jalur fisik menyimpan state Auto sendiri selama demo dan menerapkan output hanya sekali saat handoff. Stop/start diperiksa setelah tick sensor dan expiry; topik demo memakai subscribe QoS 1. Backend menolak metadata idle kontradiktif dan Flutter menerima bukti `final_idle` tanpa mencampurkan histori.
 - Hasil flash, koneksi ke broker dengan CA sebenarnya, serta pengamatan relay/rotor belum tercatat. Ikuti [runbook gladi](../../demo-scenario-bench.md) sebelum demo publik.

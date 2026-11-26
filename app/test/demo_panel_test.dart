@@ -43,8 +43,11 @@ void main() {
       observe(0, 'shower', 55, 0, 'IDLE');
       observe(5, 'shower', 75, 45, 'RUNNING');
       observe(10, 'recovery', 55, 30, 'POSTRUN');
-      observe(15, 'settling', 55, 0, 'IDLE');
-      expect(evidence.finish('completed'), startsWith('Lulus'));
+      observe(15, 'settling', 55, 30, 'POSTRUN');
+      expect(
+        evidence.finish('completed', finalIdle: true),
+        startsWith('Lulus'),
+      );
       observe(16, 'settling', 55, 0, 'IDLE', version: 2);
       expect(evidence.finish('completed'), contains('konfigurasi berubah'));
       expect(evidence.finish('stopped'), startsWith('Tidak dinilai'));

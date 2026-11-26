@@ -17,18 +17,24 @@ function parseDemoTelemetry(raw) {
   if (raw === undefined) return { source: 'physical', runId: null, meta: null };
   if (!raw || raw.v !== 1 || !Number.isInteger(raw.generation) ||
       raw.generation < 0 || raw.generation > 0xffffffff) return null;
-  const { generation, phase, run_id, end_reason, elapsed_s } = raw;
+  const { generation, phase, run_id, end_reason, elapsed_s, final_idle } = raw;
   const meta = { v: 1, generation, phase };
   if (phase === 'idle') {
+    if (!Object.keys(raw).every((key) =>
+      ['v', 'generation', 'phase', 'run_id', 'end_reason', 'final_idle'].includes(key))) return null;
     if (run_id !== undefined || end_reason !== undefined) {
       if (!isRunId(run_id) || !ENDS.includes(end_reason)) return null;
       Object.assign(meta, { run_id, end_reason });
+    }
+    if (final_idle !== undefined) {
+      if (final_idle !== true || end_reason !== 'completed') return null;
+      meta.final_idle = true;
     }
     return { source: 'physical', runId: null, meta };
   }
   const preset = demoPreset(raw);
   if (!preset || !isRunId(run_id) || !Number.isInteger(elapsed_s) ||
-      elapsed_s < 0 || elapsed_s >= 1800 || end_reason !== undefined ||
+      elapsed_s < 0 || elapsed_s >= 1800 || end_reason !== undefined || final_idle !== undefined ||
       !(preset.kind === 'shower' ? ['shower', 'recovery', 'settling'] : ['smoking', 'settling']).includes(phase)) {
     return null;
   }
