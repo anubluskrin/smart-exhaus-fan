@@ -10,7 +10,7 @@
 
 Proyek IoT empat layer: exhaust fan kamar mandi yang menyala otomatis berdasarkan kelembapan udara, bisa dipantau dan dikendalikan dari aplikasi Android, serta menyimpan riwayat data untuk ditampilkan sebagai grafik.
 
-> **Status saat ini:** Tahap 0 sampai 7 selesai (seluruh fitur berjalan di perangkat asli). **Tahap 8 (penguatan) berjalan**: autentikasi API, alamat server yang bisa diubah dari aplikasi, dan portal pengaturan WiFi sudah selesai; sisanya fallback offline, MQTT Last Will, dan validasi sertifikat TLS. Lihat [Tahapan pengerjaan](#tahapan-pengerjaan).
+> **Status saat ini:** Tahap 0 sampai 7 selesai (seluruh fitur berjalan di perangkat asli), ditambah **deteksi asap MQ-2** yang sudah lengkap dari firmware sampai aplikasi. **Tahap 8 (penguatan) berjalan**: autentikasi API, alamat server dari aplikasi, dan portal WiFi sudah selesai; sisanya fallback offline, MQTT Last Will, dan validasi sertifikat TLS. Lihat [Tahapan pengerjaan](#tahapan-pengerjaan).
 ---
 
 ## Daftar isi
@@ -77,6 +77,7 @@ Data sensor mengalir naik dari Layer 1 ke Layer 4. Perintah pengguna mengalir tu
 - **Autentikasi API**: semua alamat `/api/...` memerlukan header `X-API-Key`. Kunci disimpan di `.env` backend dan diisi sekali di layar Pengaturan aplikasi. Backend menolak berjalan tanpa kunci, dan membatasi percobaan salah (10 kali per menit per alamat).
 - **Alamat server dapat diubah dari aplikasi** (layar Pengaturan, kartu **Alamat server**, dengan tombol uji koneksi), jadi berpindah jaringan tidak perlu membangun ulang APK.
 - **Portal pengaturan WiFi di ESP32**: kalau WiFi tersimpan dan WiFi bawaan gagal, ESP32 membuka WiFi `Bathfan-Setup` (dengan password portal) selama 3 menit. Sambungkan dari HP, pilih WiFi tujuan dan isi passwordnya, lalu tersimpan di memori ESP32. Menahan tombol BOOT 5 detik saat menyala menghapus WiFi tersimpan.
+- **Deteksi asap (MQ-2)**: saat asap terdeteksi (misalnya asap rokok), fan menyala penuh sampai udara bersih, lalu berhenti setelah asap hilang dan kelembapan aman. Pembacaan dirata-rata, level udara bersih dipelajari sendiri (jadi tidak memakai angka tetap), dan ambang menyala dan bersih bisa diubah dari layar Pengaturan. Dashboard menampilkan banner **Asap terdeteksi** dan kartu **Kualitas udara**. Ini indikator untuk menyalakan fan, **bukan alarm kebakaran**.
 
 ## Teknologi
 
@@ -227,6 +228,12 @@ Di `secrets.h`, isi juga `SETUP_AP_PASS` (password WiFi portal `Bathfan-Setup`, 
 | Relay: VCC, GND, IN | 5V, GND, D23 (GPIO 23) |
 | Relay: COM | plus adaptor 12V |
 | Adaptor 12V: minus | rel GND |
+| MQ-2: VCC | 3V3 ESP32 (lihat catatan di bawah tabel) |
+| MQ-2: GND | rel GND |
+| MQ-2: AO | D34 (GPIO 34, pin ADC1) |
+| MQ-2: DO | tidak dipakai |
+
+**Catatan MQ-2:** modul ini dirancang untuk daya 5V. Di 3,3V pemanasnya lebih lemah (respons lebih lambat), tapi pada pengujian proyek ini responsnya terhadap asap tetap jelas dan keluaran AO tidak melebihi 3,3V sehingga bisa langsung ke GPIO 34. Kalau memakai 5V, **AO wajib melewati pembagi tegangan** (dua resistor sama besar, misalnya 10 kΩ) sebelum ke ESP32, karena pin ESP32 hanya tahan 3,3V. Pembacaan baru dipercaya setelah pemanasan 10 menit (`MQ_WARMUP_MS`).
 
 **Aturan keselamatan:** jalur +12V hanya lewat terminal relay dan konektor fan. Jangan pernah menancapkan kabel 12V ke breadboard atau pin ESP32 mana pun: rel breadboard biasanya sudah tersambung ke 3V3 atau 5V, dan 12V di sana merusak ESP32 dan sensor. Satu-satunya hubungan antara sisi 12V dan ESP32 adalah GND bersama. Cabut adaptor dan USB sebelum mengubah rangkaian.
 
@@ -270,12 +277,12 @@ PostgreSQL berjalan otomatis sebagai layanan Windows.
 
 | Topic | Arah | Isi |
 |---|---|---|
-| `bathfan/{id}/telemetry` | ESP32 ke broker (tiap 5 detik) | `{"hum":72.5,"temp":29.1,"pwm":65,"mode":"auto","power":true,"standby":false,"relay":true,"state":"RUNNING"}` |
+| `bathfan/{id}/telemetry` | ESP32 ke broker (tiap 5 detik) | `{"hum":72.5,"temp":29.1,"pwm":65,"mode":"auto","power":true,"standby":false,"relay":true,"smoke":18,"smoke_alert":false,"smoke_ready":true,"state":"RUNNING"}` |
 | `bathfan/{id}/cmd/mode` | ke ESP32 | `{"mode":"auto"}` atau `{"mode":"manual"}` |
 | `bathfan/{id}/cmd/speed` | ke ESP32 | `{"pwm":70}` (0 sampai 100, berlaku di mode manual) |
 | `bathfan/{id}/cmd/power` | ke ESP32 | `{"on":true}` atau `{"on":false}` |
 | `bathfan/{id}/cmd/standby` | backend ke ESP32 (tiap sekitar 1 menit dan saat berubah) | `{"active":true}` |
-| `bathfan/{id}/cmd/config` | backend ke ESP32 (retained) | `{"hum_on":70,"hum_off":60,"post_run_sec":300,"max_pwm":100}` |
+| `bathfan/{id}/cmd/config` | backend ke ESP32 (retained) | `{"hum_on":70,"hum_off":60,"post_run_sec":300,"max_pwm":100,"smoke_on":250,"smoke_off":100}` |
 
 Perintah dikirim dengan retain mati, supaya tidak terulang saat perangkat tersambung kembali. Pengecualiannya cmd/config, yang retained supaya perangkat selalu mendapat pengaturan terbaru.
 
@@ -295,7 +302,7 @@ Semua alamat `/api/...` memerlukan header `X-API-Key: <kunci>`. Tanpa kunci atau
 | `PUT /api/schedules/:id` | Ubah sebagian atau seluruh isi jadwal |
 | `DELETE /api/schedules/:id` | Hapus jadwal |
 | `GET /api/config` | Pengaturan saat ini beserta nilai bawaannya |
-| `PUT /api/config` | Ubah sebagian atau semua: `hum_on`, `hum_off`, `post_run_sec`, `max_pwm` (divalidasi: `hum_on` paling tinggi 85, `hum_off` paling rendah 40, selisih minimal 5, post-run 0 sampai 3600 detik, kecepatan maksimum 30 sampai 100) |
+| `PUT /api/config` | Ubah sebagian atau semua: `hum_on`, `hum_off`, `post_run_sec`, `max_pwm`, `smoke_on`, `smoke_off`. Validasi: `hum_on` paling tinggi 85, `hum_off` paling rendah 40, selisih minimal 5; post-run 0 sampai 60 detik; kecepatan maksimum 30 sampai 100; `smoke_on` 100 sampai 1000, `smoke_off` minimal 30, selisih keduanya minimal 50 |
 | `POST /api/config/reset` | Kembalikan semua pengaturan ke nilai bawaan |
 
 Hari berlaku: 1 = Senin sampai 7 = Minggu. Rentang yang melewati tengah malam (misalnya 22:00 sampai 05:00) didukung. Semua input divalidasi sebelum diteruskan.
@@ -307,10 +314,13 @@ Dari prioritas tertinggi ke terendah:
 | Urutan | Aturan |
 |---|---|
 | 1 | **Daya Off**: fan mati total |
-| 2 | **Kelembapan kritis (90 persen atau lebih)**: fan menyala sesuai kelembapan, bahkan saat Standby |
-| 3 | **Standby aktif**: fan berhenti, termasuk di mode Manual |
-| 4 | **Manual**: fan mengikuti kecepatan yang diatur pengguna |
-| 5 | **Auto**: menyala di atas 70 persen, mati di bawah 60 persen (hysteresis), lalu post-run |
+| 2 | **Asap terdeteksi**: fan menyala penuh, mengalahkan Standby dan Manual |
+| 3 | **Kelembapan kritis (90 persen atau lebih)**: fan menyala sesuai kelembapan, bahkan saat Standby |
+| 4 | **Standby aktif**: fan berhenti, termasuk di mode Manual |
+| 5 | **Manual**: fan mengikuti kecepatan yang diatur pengguna |
+| 6 | **Auto**: menyala di atas 70 persen, mati di bawah 60 persen (hysteresis), lalu post-run |
+
+**Cara kerja deteksi asap:** firmware merata-ratakan 16 pembacaan MQ-2 setiap 2 detik, lalu menghitung kenaikan di atas *level dasar* yang dipelajari sendiri: selama pemanasan ikut bacaan ke dua arah, sesudahnya turun cepat, naik sangat pelan, dan dibekukan saat ada asap (supaya asap tidak dianggap kondisi normal baru). Alarm menyala saat kenaikan melewati `smoke_on` (bawaan 250) dan dianggap bersih saat di bawah `smoke_off` (bawaan 100) selama 1 menit. Setelah bersih, kalau kelembapan di atas batas menyala fan lanjut RUNNING, kalau tidak masuk post-run lalu IDLE.
 
 Batas menyala, batas mati, post-run, dan kecepatan maksimum kini diatur dari aplikasi (bawaan 70 %, 60 %, 5 menit, 100 %). Konstanta tetap di firmware: `MIN_SPEED` 30, `HUM_CRITICAL` 90, `STANDBY_TIMEOUT_MS` 180000.
 
@@ -334,6 +344,7 @@ Legenda: ✅ selesai, 🔄 sedang dikerjakan, ⏳ belum.
 | 8b | Penguatan: alamat server dapat diubah dari aplikasi, portal pengaturan WiFi di ESP32 | ✅ |
 | 8c | Penguatan: fallback offline di firmware (fan tetap bekerja tanpa WiFi, relay terbuka bila tidak ada kendali), MQTT Last Will | ⏳ |
 | 8d | Penguatan: validasi sertifikat TLS di firmware, HTTPS | ⏳ |
+| 8e | Fitur tambahan: deteksi asap MQ-2 (firmware, database, API, pengaturan ambang, banner dan kartu kualitas udara di aplikasi) | ✅ |
 | 9 | Pengujian skenario, pembaruan laporan, dan persiapan demo | ⏳ |
 
 ### Posisi sekarang
@@ -360,6 +371,8 @@ Laporan di `docs/` masih memakai rancangan awal dan perlu diperbarui di Tahap 9.
 - API dilindungi kunci (`X-API-Key`), tapi komunikasi aplikasi ke backend masih HTTP biasa, jadi kunci bisa disadap di jaringan yang tidak tepercaya. Sebelum backend dibuka ke internet, gunakan HTTPS (misalnya lewat terowongan seperti Cloudflare Tunnel).
 - Gunakan fan DC 12V dan adaptor untuk bagian di kamar mandi. Jangan menyambung ke listrik rumah secara langsung.
 - Ground adaptor 12V dan ground ESP32 harus disambung. Pin PWM fan hanya menerima sinyal kecil, dan 12V di pin itu merusak fan.
+- Deteksi asap hanya **indikator untuk menyalakan fan**, bukan pengganti detektor asap atau alarm kebakaran bersertifikat. Sensor MQ-2 juga peka terhadap gas mudah terbakar, jadi jangan diuji dengan gas korek, dan jauhkan dari api dan barang mudah terbakar.
+- Keterbatasan: level dasar sensor MQ bergeser menurut suhu dan kelembapan, dan sensor butuh pemanasan 10 menit setelah menyala. Pengujian memakai asap kertas dan uap air dari segelas air panas dan air mendidih (uap tidak menaikkan bacaan secara berarti pada jarak uji). **Belum diuji di kamar mandi sungguhan** dengan air panas mengalir dan kelembapan sangat tinggi, di mana uap bisa memicu alarm palsu.
 
 ## Pemecahan masalah
 
@@ -373,3 +386,5 @@ Laporan di `docs/` masih memakai rancangan awal dan perlu diperbarui di Tahap 9.
 | MQTT Explorer tidak menampilkan pesan | Atur langganan ke `bathfan/#`, bukan `#`. Hapus langganan bawaan |
 | `adb` tidak dikenali | Tambahkan folder `platform-tools` Android SDK ke PATH |
 | Hot reload ditolak | Ada error kompilasi. Periksa panel Problems, lalu tekan `R` untuk hot restart |
+| Kartu Kualitas udara selalu "Sensor memanas" | Sensor butuh 10 menit setelah menyala. Setiap unggah atau tombol EN mengulang hitungannya |
+| Asap tidak terdeteksi walau kartu "Bersih" | Ambang `smoke_on` terlalu tinggi, atau sensor belum selesai memanas. Turunkan ambang di layar Pengaturan |
