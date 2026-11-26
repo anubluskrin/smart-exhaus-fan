@@ -478,9 +478,12 @@ class _DashboardPageState extends State<DashboardPage> {
     }
   }
 
+  bool get _demoAdminAllowed =>
+      isAdminSession && (isEffectiveDebugMode || kBaseUrl.startsWith('https://'));
+
   Future<void> _sendDemo({DemoPreset? preset, String? stopId}) async {
     final status = _status;
-    if (!isAdminSession || !kBaseUrl.startsWith('https://') || status == null || !status.demoAvailable ||
+    if (!_demoAdminAllowed || status == null || !status.demoAvailable ||
         (_demoRequest?.expired == false) || !widget.isActive ||
         !isEffectivelyOnline(status, _fetchedAt, DateTime.now())) {
       return;
@@ -543,7 +546,7 @@ class _DashboardPageState extends State<DashboardPage> {
     final standby = online && power && s?.state == 'STANDBY';
     final showSmokeBanner = s != null && s.hasLatest && online && s.smokeAlert;
     final admin = isAdminSession;
-    final demoAdmin = admin && kBaseUrl.startsWith('https://');
+    final demoAdmin = _demoAdminAllowed;
 
     return Scaffold(
       body: SafeArea(
