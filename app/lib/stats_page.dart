@@ -78,7 +78,8 @@ String _fmtDuration(int sec) {
 
 class StatsPage extends StatefulWidget {
   final bool isActive;
-  const StatsPage({super.key, this.isActive = true});
+  final ({String device, String id})? latestDemo;
+  const StatsPage({super.key, this.isActive = true, this.latestDemo});
 
   @override
   State<StatsPage> createState() => _StatsPageState();
@@ -92,6 +93,7 @@ class _StatsPageState extends State<StatsPage> {
   Timer? _timer;
   int _reqId = 0;
   String _activeOrigin = originOf(kBaseUrl);
+  bool _showDemo = false;
 
   @override
   void initState() {
@@ -103,8 +105,18 @@ class _StatsPageState extends State<StatsPage> {
   @override
   void didUpdateWidget(covariant StatsPage oldWidget) {
     super.didUpdateWidget(oldWidget);
+    final changedRun = _showDemo && widget.latestDemo != oldWidget.latestDemo;
+    if (changedRun) {
+      _showDemo = widget.latestDemo != null;
+      _reqId++;
+      _points = [];
+      _loaded = false;
+      _error = null;
+    }
     if (oldWidget.isActive != widget.isActive) {
       _syncPolling(immediate: widget.isActive);
+    } else if (changedRun && widget.isActive) {
+      _load();
     }
   }
 
@@ -122,6 +134,7 @@ class _StatsPageState extends State<StatsPage> {
     if (originChanged || !isAdminSession) {
       setState(() {
         _activeOrigin = nextOrigin;
+        if (originChanged) _showDemo = false;
         _points = [];
         _loaded = false;
         _error = null;
@@ -149,10 +162,15 @@ class _StatsPageState extends State<StatsPage> {
     final epoch = kSessionEpoch;
     final origin = originOf(kBaseUrl);
     final r = _ranges[_rangeIndex];
+    final demo = _showDemo ? widget.latestDemo : null;
+    final uri = Uri.parse('$kBaseUrl/api/history').replace(queryParameters: {
+      'range': r.key,
+      if (demo != null) ...{'source': 'demo', 'run_id': demo.id, 'device': demo.device},
+    });
 
     try {
       final res = await http
-          .getForSession(Uri.parse('$kBaseUrl/api/history?range=${r.key}'))
+          .getForSession(uri)
           .timeout(const Duration(seconds: 8));
       if (!mounted || id != _reqId || epoch != kSessionEpoch || origin != originOf(kBaseUrl)) {
         return;
@@ -218,6 +236,19 @@ class _StatsPageState extends State<StatsPage> {
       ),
       child: child,
     );
+  }
+
+  void _selectSource(bool demo) {
+    if (_showDemo == demo) return;
+    _reqId++;
+    setState(() {
+      _showDemo = demo;
+      _rangeIndex = 0;
+      _points = [];
+      _loaded = false;
+      _error = null;
+    });
+    _load();
   }
 
   Widget _chip(int i) {
@@ -319,6 +350,13 @@ class _StatsPageState extends State<StatsPage> {
               style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700),
             ),
             const SizedBox(height: 16),
+            if (widget.latestDemo != null)
+              Wrap(spacing: 8, children: [
+                ChoiceChip(label: const Text('Sensor fisik'), selected: !_showDemo,
+                  onSelected: (_) => _selectSource(false)),
+                ChoiceChip(label: const Text('Demo terakhir'), selected: _showDemo,
+                  onSelected: (_) => _selectSource(true)),
+              ]),
             Row(children: [for (int i = 0; i < _ranges.length; i++) _chip(i)]),
             const SizedBox(height: 16),
             _card(

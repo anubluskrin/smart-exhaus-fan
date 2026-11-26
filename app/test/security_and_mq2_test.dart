@@ -37,6 +37,34 @@ void main() {
     resetConfigForTest(secureStorage: secureStore);
   });
 
+  testWidgets('Guest joins a running scene from ESP32 without access to the operator panel', (tester) async {
+    const origin = 'https://demo.example.com';
+    SharedPreferences.setMockInitialValues({'base_url': origin});
+    await initAppConfig(trustedAdminOriginOverride: origin, isDebugMode: false);
+    final requests = <http.Request>[];
+    api_http.testHttpClient = MockClient((req) async {
+      requests.add(req);
+      return http.Response(jsonEncode({
+        'device': 'fan01', 'online': true, 'demo_available': true,
+        'last_seen_sec_ago': 0, 'latest': {
+          'humidity': 74, 'temperature': 29, 'fan_pwm': 48, 'mode': 'auto',
+          'power': true, 'smoke': 0, 'smoke_ready': true, 'source': 'demo',
+          'demo': {'v': 1, 'kind': 'shower', 'phase': 'shower', 'elapsed_s': 9,
+            'run_id': '00000000-0000-4000-8000-000000000001', 'speed': 10},
+        },
+      }), 200);
+    });
+    await tester.pumpWidget(const MaterialApp(home: DashboardPage()));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 20));
+    expect(find.text('Air mengalir'), findsOneWidget);
+    expect(find.text('PWM dilaporkan: 48%'), findsOneWidget);
+    expect(find.text('Skenario Demo'), findsNothing);
+    expect(requests.map((r) => r.method), ['GET']);
+    expect(requests.single.headers.keys.any((k) => k.toLowerCase() == 'x-api-key'), isFalse);
+    await tester.pumpWidget(const SizedBox());
+  });
+
   test('normalizeBaseUrl menolak HTTP publik, HTTP di release, prefix palsu, dan komponen URL terlarang', () {
     expect(normalizeBaseUrl('http://example.com', isDebugMode: false), isNull);
     expect(normalizeBaseUrl('http://localhost:3000', isDebugMode: false), isNull);

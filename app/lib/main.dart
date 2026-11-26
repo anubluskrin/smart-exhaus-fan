@@ -7,6 +7,9 @@ import 'package:flutter/material.dart';
 import 'air_flow.dart';
 import 'api_http.dart' as http;
 import 'constants.dart';
+import 'demo_models.dart';
+import 'demo_panel.dart';
+import 'demo_scene.dart';
 import 'feedback_page.dart';
 import 'schedules_page.dart';
 import 'settings_page.dart';
@@ -26,6 +29,9 @@ class FanStatus {
   final bool smokeAlert;
   final bool smokeReady;
   final DateTime? sampleTime;
+  final String device;
+  final DemoSnapshot? demo;
+  final bool demoAvailable, sensorOk, standby;
 
   FanStatus({
     required this.online,
@@ -41,6 +47,11 @@ class FanStatus {
     this.smokeAlert = false,
     this.smokeReady = false,
     this.sampleTime,
+    this.device = 'fan01',
+    this.demo,
+    this.demoAvailable = false,
+    this.sensorOk = false,
+    this.standby = false,
   });
 
   factory FanStatus.fromJson(Map<String, dynamic> j) {
@@ -59,6 +70,11 @@ class FanStatus {
       smokeAlert: latest?['smoke_alert'] == true,
       smokeReady: latest?['smoke_ready'] == true,
       sampleTime: DateTime.tryParse((latest?['time'] as String?) ?? '')?.toLocal(),
+      device: j['device'] as String? ?? 'fan01',
+      demo: DemoSnapshot.fromJson(latest?['demo']),
+      demoAvailable: j['demo_available'] == true,
+      sensorOk: latest?['sensor_ok'] == true,
+      standby: latest?['standby'] == true,
     );
   }
 }
@@ -190,7 +206,8 @@ class BathfanApp extends StatelessWidget {
 
 class DashboardPage extends StatefulWidget {
   final bool isActive;
-  const DashboardPage({super.key, this.isActive = true});
+  final ValueChanged<({String device, String id})>? onDemoRun;
+  const DashboardPage({super.key, this.isActive = true, this.onDemoRun});
 
   @override
   State<DashboardPage> createState() => _DashboardPageState();
@@ -207,6 +224,16 @@ class _DashboardPageState extends State<DashboardPage> {
   double _manualSpeed = 50;
   bool? _pendingPower;
   String _activeOrigin = originOf(kBaseUrl);
+  int _refreshId = 0;
+  bool _refreshInFlight = false;
+  bool _showDemoPanel = false;
+  DemoRequest? _demoRequest;
+  Timer? _demoDeadline;
+  String? _demoError, _trendRun;
+  DateTime? _trendTime;
+  final _demoTrend = <DemoTrendPoint>[];
+  DemoEvidence? _demoEvidence;
+  String? _demoVerdict;
 
   @override
   void initState() {
@@ -229,6 +256,7 @@ class _DashboardPageState extends State<DashboardPage> {
     _timer?.cancel();
     _pendingModeTimer?.cancel();
     _pendingPowerTimer?.cancel();
+    _demoDeadline?.cancel();
     super.dispose();
   }
 
@@ -237,7 +265,15 @@ class _DashboardPageState extends State<DashboardPage> {
     final nextOrigin = originOf(kBaseUrl);
     final originChanged = nextOrigin != _activeOrigin;
     final clearedProtected = originChanged || !isAdminSession;
+    _refreshId++;
+    _refreshInFlight = false;
+    _demoDeadline?.cancel();
     setState(() {
+      _demoRequest = null;
+      _demoError = null;
+      _showDemoPanel = false;
+      _demoEvidence = null;
+      _demoVerdict = null;
       if (originChanged) {
         _activeOrigin = nextOrigin;
       }
@@ -245,6 +281,9 @@ class _DashboardPageState extends State<DashboardPage> {
         _status = null;
         _fetchedAt = null;
         _error = null;
+        _demoTrend.clear();
+        _trendRun = null;
+        _trendTime = null;
       }
       _pendingMode = null;
       _pendingPower = null;
@@ -255,6 +294,8 @@ class _DashboardPageState extends State<DashboardPage> {
   }
 
   void _syncPolling({required bool immediate}) {
+    _refreshId++;
+    _refreshInFlight = false;
     _timer?.cancel();
     _timer = null;
     if (!widget.isActive) return;
@@ -342,6 +383,7 @@ class _DashboardPageState extends State<DashboardPage> {
   }
 
   Future<void> _refresh() async {
+    if (_refreshInFlight) return;
     if (kBaseUrl.isEmpty) {
       if (mounted) {
         setState(() => _error = 'Alamat server belum diatur di Pengaturan.');
@@ -350,12 +392,16 @@ class _DashboardPageState extends State<DashboardPage> {
     }
     final epoch = kSessionEpoch;
     final origin = originOf(kBaseUrl);
+    final requestId = ++_refreshId;
+    _refreshInFlight = true;
+    bool current() => mounted && requestId == _refreshId &&
+        epoch == kSessionEpoch && origin == originOf(kBaseUrl);
     try {
       final res = await http
           .getForSession(Uri.parse('$kBaseUrl/api/status'))
           .timeout(const Duration(seconds: 5));
 
-      if (!mounted || epoch != kSessionEpoch || origin != originOf(kBaseUrl)) {
+      if (!current()) {
         return;
       }
 
@@ -370,19 +416,108 @@ class _DashboardPageState extends State<DashboardPage> {
 
       if (res.statusCode != 200) throw Exception('HTTP ${res.statusCode}');
       final data = jsonDecode(res.body) as Map<String, dynamic>;
-      if (!mounted || epoch != kSessionEpoch || origin != originOf(kBaseUrl)) {
+      if (!current()) {
         return;
       }
+      final status = FanStatus.fromJson(data);
       setState(() {
-        _status = FanStatus.fromJson(data);
+        _status = status;
+        _observeDemo(status);
         _fetchedAt = DateTime.now();
         _error = null;
       });
+      final runId = status.demo?.id;
+      if (runId != null) widget.onDemoRun?.call((device: status.device, id: runId));
     } catch (e) {
-      if (!mounted || epoch != kSessionEpoch || origin != originOf(kBaseUrl)) {
+      if (!current()) {
         return;
       }
       setState(() => _error = 'Gagal memperbarui data ($e)');
+    } finally {
+      if (_refreshId == requestId) _refreshInFlight = false;
+    }
+  }
+
+  void _observeDemo(FanStatus status) {
+    final run = status.demo;
+    final pending = _demoRequest;
+    if (!status.online) _demoEvidence?.invalidate('koneksi terputus');
+    if (status.online && run?.active == true) {
+      if (_trendRun != run!.id) {
+        _trendRun = run.id;
+        _trendTime = null;
+        _demoTrend.clear();
+      }
+      if (_showDemoPanel) {
+        if (_demoEvidence?.runId != run.id) {
+          _demoEvidence = DemoEvidence(run);
+          _demoVerdict = null;
+        }
+        _demoEvidence!.observe(run, humidity: status.humidity, smoke: status.smoke,
+          alarm: status.smokeAlert, pwm: status.fanPwm, state: status.state,
+          autoControl: status.power && status.mode == 'auto' && !status.standby);
+      }
+      if (_trendTime != status.sampleTime) {
+        _trendTime = status.sampleTime;
+        _demoTrend.add((humidity: status.humidity, smoke: status.smoke));
+        if (_demoTrend.length > 120) _demoTrend.removeAt(0);
+      }
+    }
+    if (status.online && run?.endReason != null && run?.id == _demoEvidence?.runId) {
+      _demoVerdict = _demoEvidence?.finish(run?.endReason);
+      _demoEvidence = null;
+    }
+    if (pending == null || run == null || !status.online) return;
+    final confirmed = run.id == pending.id &&
+        (pending.stop ? !run.active && run.endReason != null : run.active || run.endReason != null);
+    final conflict = run.active && run.id != pending.id;
+    if (confirmed || conflict) {
+      _demoDeadline?.cancel();
+      _demoRequest = null;
+      _demoError = conflict ? 'Perangkat sedang menjalankan skenario lain' : null;
+    }
+  }
+
+  Future<void> _sendDemo({DemoPreset? preset, String? stopId}) async {
+    final status = _status;
+    if (!isAdminSession || !kBaseUrl.startsWith('https://') || status == null || !status.demoAvailable ||
+        (_demoRequest?.expired == false) || !widget.isActive ||
+        !isEffectivelyOnline(status, _fetchedAt, DateTime.now())) {
+      return;
+    }
+    final id = stopId ?? newDemoId();
+    final action = DemoRequest(id, stopId != null);
+    final epoch = kSessionEpoch;
+    final origin = originOf(kBaseUrl);
+    bool current() => mounted && kSessionEpoch == epoch && originOf(kBaseUrl) == origin &&
+        identical(_demoRequest, action);
+    setState(() {
+      _demoRequest = action;
+      _demoError = null;
+    });
+    _demoDeadline?.cancel();
+    _demoDeadline = Timer(const Duration(seconds: 15), () {
+      if (!current()) return;
+      setState(() => _demoRequest = DemoRequest(id, action.stop, expired: true));
+      if (widget.isActive) _refresh();
+    });
+    try {
+      final body = preset?.toStartBody(status.device, id) ?? {'device': status.device, 'run_id': id};
+      final response = await http.postAdmin(
+        Uri.parse('$kBaseUrl/api/demo/${action.stop ? 'stop' : 'start'}'),
+        headers: {'Content-Type': 'application/json'}, body: jsonEncode(body),
+      ).timeout(const Duration(seconds: 8));
+      if (!current()) return;
+      if (response.statusCode != 202) {
+        _demoDeadline?.cancel();
+        setState(() {
+          _demoRequest = null;
+          _demoError = 'Perintah tidak dikonfirmasi server (${response.statusCode})';
+        });
+      }
+      if (widget.isActive) _refresh();
+    } catch (_) {
+      if (current() && widget.isActive) _refresh();
     }
   }
 
@@ -408,6 +543,7 @@ class _DashboardPageState extends State<DashboardPage> {
     final standby = online && power && s?.state == 'STANDBY';
     final showSmokeBanner = s != null && s.hasLatest && online && s.smokeAlert;
     final admin = isAdminSession;
+    final demoAdmin = admin && kBaseUrl.startsWith('https://');
 
     return Scaffold(
       body: SafeArea(
@@ -461,7 +597,26 @@ class _DashboardPageState extends State<DashboardPage> {
                 ),
               ),
               const SizedBox(height: 14),
-              _hero(s, power ? color : const Color(0xFF4B5F7F), online),
+              if (demoAdmin && (s?.demoAvailable == true || _showDemoPanel)) ...[
+                OutlinedButton.icon(onPressed: () => setState(() => _showDemoPanel = !_showDemoPanel),
+                  icon: const Icon(Icons.science_outlined), label: const Text('Skenario Demo')),
+                if (_showDemoPanel) DemoPanel(
+                  snapshot: s?.demo, request: _demoRequest, online: online,
+                  ready: s?.demoAvailable == true && s?.sensorOk == true && s?.smokeReady == true && s?.smokeAlert != true,
+                  mode: s?.mode, power: s?.power ?? false, standby: s?.standby ?? false,
+                  error: _demoError,
+                  verdict: _demoEvidence?.progress ?? _demoVerdict ??
+                    (s?.demo?.endReason == null ? null : 'Tidak dinilai · run tidak teramati'),
+                  onStart: (preset) => _sendDemo(preset: preset),
+                  onStop: (id) => _sendDemo(stopId: id),
+                ),
+              ],
+              if (s != null && s.demo?.active == true)
+                DemoScene(snapshot: s.demo!, humidity: s.humidity, temperature: s.temperature, smokeDelta: s.smoke,
+                  smokeAlert: s.smokeAlert, fanPwm: s.fanPwm ?? 0, online: online,
+                  isActive: widget.isActive, trend: List.of(_demoTrend))
+              else
+                _hero(s, power ? color : const Color(0xFF4B5F7F), online),
               const SizedBox(height: 16),
               if (showSmokeBanner) ...[
                 _smokeBanner(s),
@@ -967,16 +1122,28 @@ class HomeShell extends StatefulWidget {
 class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   int _index = 0;
   bool _foreground = true;
+  final _lastDemo = ValueNotifier<({String device, String id})?>(null);
+  String _demoOrigin = originOf(kBaseUrl);
+
+  void _clearDemoOnOriginChange() {
+    final next = originOf(kBaseUrl);
+    if (_demoOrigin == next) return;
+    _demoOrigin = next;
+    _lastDemo.value = null;
+  }
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    sessionNotifier.addListener(_clearDemoOnOriginChange);
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    sessionNotifier.removeListener(_clearDemoOnOriginChange);
+    _lastDemo.dispose();
     super.dispose();
   }
 
@@ -994,8 +1161,9 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       body: IndexedStack(
         index: _index,
         children: [
-          DashboardPage(isActive: _foreground && _index == 0),
-          StatsPage(isActive: _foreground && _index == 1),
+          DashboardPage(isActive: _foreground && _index == 0, onDemoRun: (run) => _lastDemo.value = run),
+          ValueListenableBuilder(valueListenable: _lastDemo,
+            builder: (_, run, _) => StatsPage(isActive: _foreground && _index == 1, latestDemo: run)),
           SchedulesPage(isActive: _foreground && _index == 2),
           const FeedbackPage(),
           SettingsPage(isActive: _foreground && _index == 4),
