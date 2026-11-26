@@ -1,5 +1,11 @@
 # Smart Humidity-Based Bathroom Exhaust Fan
 
+## Lab Skenario di meja bazar
+
+Gunakan **Panel Skenario** di HP tim untuk preset Mandi atau Asap tanpa menghasilkan uap/asap nyata. ESP32 demo memasukkan bacaan virtual ke logika kontrol asli; fan fisik tetap dikendalikan firmware. Dashboard Guest menampilkan adegan dan PWM yang dilaporkan ESP32, bukan RPM.
+
+Fitur default mati. Aktifkan hanya pada perangkat khusus pameran (`BATHFAN_DEMO_ENABLED=1` saat build firmware, `APP_PROFILE=bazar` dan `DEMO_SCENARIOS_ENABLED=true` di backend). Lihat [runbook gladi dua HP](docs/demo-scenario-bench.md) untuk prasyarat, uji penerimaan dan rollback.
+
 ## 👥 Kontributor
 
 | Nama | NIM |
