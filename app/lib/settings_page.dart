@@ -399,8 +399,8 @@ class _SettingsPageState extends State<SettingsPage> {
     });
 
     final ok = await verifyAndActivateAdmin(key);
-    _key.clear();
     if (!mounted) return;
+    _key.clear();
     setState(() {
       _adminBusy = false;
       _adminOk = ok;
@@ -552,9 +552,14 @@ class _SettingsPageState extends State<SettingsPage> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              const Text('Akses Admin (Khusus Tim)', style: TextStyle(fontSize: 15)),
+              const Expanded(
+                child: Text(
+                  'Akses Admin (Khusus Tim)',
+                  style: TextStyle(fontSize: 15),
+                ),
+              ),
+              const SizedBox(width: 8),
               Text(
                 admin ? 'Aktif' : 'Pengunjung',
                 style: TextStyle(
