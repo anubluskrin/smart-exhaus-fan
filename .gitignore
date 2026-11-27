@@ -4,4 +4,5 @@ node_modules/
 *.db
 poster
 laporan-akhir
+app/android/build/
 AGENTS.md
