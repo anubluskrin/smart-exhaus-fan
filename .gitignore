@@ -2,3 +2,6 @@
 secrets.h
 node_modules/
 *.db
+poster
+laporan-akhir
+AGENTS.md
