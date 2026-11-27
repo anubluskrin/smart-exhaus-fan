@@ -253,9 +253,6 @@ class _DashboardPageState extends State<DashboardPage> {
                 ],
               ),
               const SizedBox(height: 16),
-              _modeSelector(mode),
-              if (mode == 'manual') ...[
-              const SizedBox(height: 16),
               _airCard(s),
               const SizedBox(height: 16),
               IgnorePointer(
@@ -289,8 +286,7 @@ class _DashboardPageState extends State<DashboardPage> {
                     style: const TextStyle(color: Color(0xFFF87171)),
                   ),
                 ),
-            ],
-            ],
+              ],
           ),
         ),
       ),
