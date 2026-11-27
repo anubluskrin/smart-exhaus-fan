@@ -16,8 +16,6 @@ const String _kDefinedDefaultBaseUrl = String.fromEnvironment(
   'DEFAULT_BASE_URL',
   defaultValue: '',
 );
-const String _kLegacyDebugDefaultUrl = 'http://192.168.110.42:3000';
-
 const String _kBaseUrlPref = 'base_url';
 const String _kLegacyApiKeyPref = 'api_key';
 const String _kSecureOriginKey = 'bathfan_admin_origin';
@@ -67,6 +65,10 @@ final ValueNotifier<int> sessionNotifier = ValueNotifier<int>(0);
 Future<void>? _sessionQueue;
 
 bool get isEffectiveDebugMode => _effectiveDebugMode;
+
+bool get canConfigureAdmin =>
+    _trustedAdminOrigin.isNotEmpty ||
+    (_effectiveDebugMode && !_hasExplicitAdminOriginConfig);
 
 String get kTrustedAdminOrigin {
   if (_hasExplicitAdminOriginConfig) return _trustedAdminOrigin;
@@ -126,8 +128,7 @@ String _computeDefaultBaseUrl({required bool isDebugMode}) {
     );
     if (normalized != null) return normalized;
   }
-  if (_trustedAdminOrigin.isNotEmpty) return _trustedAdminOrigin;
-  return isDebugMode ? _kLegacyDebugDefaultUrl : '';
+  return _trustedAdminOrigin;
 }
 
 final RegExp _ipv4Re = RegExp(r'^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$');
@@ -282,7 +283,9 @@ Future<void> initAppConfig({
     }
     final savedUrl = prefs.getString(_kBaseUrlPref);
     if (savedUrl != null) {
-      final normalized = normalizeBaseUrl(savedUrl, isDebugMode: debug);
+      final normalized = savedUrl.isEmpty
+          ? ''
+          : normalizeBaseUrl(savedUrl, isDebugMode: debug);
       if (normalized != null) {
         kBaseUrl = normalized;
       }
@@ -309,10 +312,9 @@ Future<void> initAppConfig({
 }
 
 Future<bool> setServerAddress(String input, {bool? isDebugMode}) async {
-  final normalized = normalizeBaseUrl(
-    input,
-    isDebugMode: isDebugMode ?? _effectiveDebugMode,
-  );
+  final normalized = input.trim().isEmpty
+      ? ''
+      : normalizeBaseUrl(input, isDebugMode: isDebugMode ?? _effectiveDebugMode);
   if (normalized == null) return false;
 
   final previousOrigin = originOf(kBaseUrl);

@@ -224,12 +224,31 @@ flutter test
   ```
   Untuk emulator tanpa `adb reverse`, atur URL ke `http://10.0.2.2:3000`. Untuk HP tanpa USB, gunakan IP privat laptop dan batasi firewall ke jaringan pengujian. HTTP hanya diizinkan di build debug untuk loopback atau LAN privat; gunakan HTTPS untuk konfigurasi rilis.
 
-- **Build APK Pengunjung (Guest murni, tanpa akses Admin):**
+**Build APK Tim + Pengunjung di Windows (tanpa HP/emulator):** dari root repo:
+
+```powershell
+# Debug, tanpa alamat bawaan. Isi atau ubah alamat dari Pengaturan setelah instalasi.
+.\scripts\build-bazar.ps1
+
+# Opsional: beri alamat awal untuk APK debug.
+.\scripts\build-bazar.ps1 -ApiUrl http://192.168.1.8:3000
+
+# Release, backend Bazar via HTTPS.
+.\scripts\build-bazar.ps1 -Release -ApiUrl https://api-bazar.domain-anda.com
+```
+
+APK disimpan sebagai `hembus-tim.apk` dan `hembus-pengunjung.apk` di `app/build/outputs/apk-bazar/debug/` atau `app/build/outputs/apk-bazar/release/`. Skrip hanya membuat APK; tidak menjalankan server, `adb`, atau memasang aplikasi. Tanpa `-ApiUrl`, instalasi baru APK debug tidak memakai alamat bawaan. Di **Pengaturan → Alamat server**, isi IP LAN laptop dan tekan **Simpan**. Kalau IP berubah, ubah alamatnya tanpa rebuild; Admin perlu verifikasi lagi pada alamat baru. Kosongkan kolom lalu tekan **Simpan** jika tidak ingin terhubung. Instalasi di atas versi lama tetap memakai alamat yang sudah disimpan sampai diubah atau dikosongkan.
+
+Untuk akses via IP LAN, backend harus menerima koneksi LAN dan HP berada di jaringan yang sama. Build Tim release tetap memerlukan origin HTTPS tepercaya yang ditentukan saat build. Kedua APK punya ID aplikasi yang sama, jadi gunakan HP berbeda untuk memasangnya berdampingan.
+
+Backend tetap perlu memakai `APP_PROFILE=bazar` agar Pengunjung dapat membaca data. APK Tim perlu verifikasi manual dengan `API_KEY` di Pengaturan; APK Pengunjung tidak bisa mengaktifkan Admin, termasuk varian debug dari skrip.
+
+- **Alternatif manual: build APK release Pengunjung (Guest murni, tanpa akses Admin):**
   ```powershell
   flutter build apk --release --split-per-abi --dart-define=DEFAULT_BASE_URL=https://api-bazar.domain-anda.com
   ```
 
-- **Build APK Tim (memiliki izin aktivasi Mode Admin ke satu origin tepercaya):**
+- **Alternatif manual: build APK release Tim (memiliki izin aktivasi Mode Admin ke satu origin tepercaya):**
   ```powershell
   flutter build apk --release --split-per-abi `
     --dart-define=ADMIN_API_ORIGIN=https://api-bazar.domain-anda.com `

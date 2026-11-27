@@ -1012,6 +1012,75 @@ void main() {
   );
 
   test(
+    'Alamat kosong mencabut sesi dan tetap kosong setelah restart',
+    () async {
+      const origin = 'https://configured.example.com';
+      await initAppConfig(
+        trustedAdminOriginOverride: origin,
+        isDebugMode: false,
+      );
+      final client = MockClient(
+        (_) async => http.Response('{"ok":true,"role":"admin"}', 200),
+      );
+      expect(kBaseUrl, origin);
+      expect(
+        await verifyAndActivateAdmin('fixture-key', client: client),
+        isTrue,
+      );
+      expect(await setServerAddress('   '), isTrue);
+      expect(kBaseUrl, isEmpty);
+      expect(isAdminSession, isFalse);
+      expect(secureStore.data, isEmpty);
+
+      await initAppConfig(
+        trustedAdminOriginOverride: origin,
+        isDebugMode: false,
+      );
+      expect(kDefaultBaseUrl, origin);
+      expect(kBaseUrl, isEmpty);
+      expect(isAdminSession, isFalse);
+    },
+  );
+
+  test(
+    'APK Pengunjung debug tidak bisa mengaktifkan Admin melalui HTTP lokal',
+    () async {
+      const origin = 'http://127.0.0.1:3000';
+      SharedPreferences.setMockInitialValues({'base_url': origin});
+      await initAppConfig(
+        trustedAdminOriginOverride: 'disabled',
+        isDebugMode: true,
+      );
+
+      expect(canConfigureAdmin, isFalse);
+      final requests = <http.Request>[];
+      final client = MockClient((request) async {
+        requests.add(request);
+        return http.Response('{}', 200);
+      });
+      expect(kTrustedAdminOrigin, isEmpty);
+      expect(
+        await verifyAndActivateAdmin('fixture-key', client: client),
+        isFalse,
+      );
+      expect(isAdminSession, isFalse);
+      expect(requests, isEmpty);
+      expect(
+        (await api_http.getForSession(
+          Uri.parse('$origin/api/status'),
+          client: client,
+        )).statusCode,
+        200,
+      );
+      expect(requests.single.url.toString(), '$origin/api/status');
+      expect(
+        requests.single.headers.keys.map((name) => name.toLowerCase()),
+        isNot(contains('x-api-key')),
+      );
+    },
+  );
+
+  test(
     'mode debug mengizinkan Admin HTTP lokal/LAN tanpa ADMIN_API_ORIGIN, sementara mode release tetap wajib HTTPS + ADMIN_API_ORIGIN',
     () async {
       // Mode release (isDebugMode: false): menolak HTTP lokal dan menonaktifkan Admin jika ADMIN_API_ORIGIN kosong
@@ -1042,8 +1111,13 @@ void main() {
       // Mode debug (isDebugMode: true) tanpa ADMIN_API_ORIGIN: mengikuti alamat lokal/LAN aktif
       const lanA = 'http://192.168.1.10:3000';
       const lanB = 'http://192.168.1.20:3000';
-      SharedPreferences.setMockInitialValues({'base_url': lanA});
+      SharedPreferences.setMockInitialValues({});
       await initAppConfig(isDebugMode: true);
+      expect(kDefaultBaseUrl, isEmpty);
+      expect(kBaseUrl, isEmpty);
+      expect(kTrustedAdminOrigin, isEmpty);
+      expect(canConfigureAdmin, isTrue);
+      expect(await setServerAddress(lanA), isTrue);
       expect(kTrustedAdminOrigin, lanA);
 
       final mockClient = MockClient((req) async {

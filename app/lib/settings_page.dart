@@ -310,6 +310,13 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 
   Future<void> _testAddress() async {
+    if (_addr.text.trim().isEmpty) {
+      setState(() {
+        _addrOk = false;
+        _addrMsg = 'Masukkan alamat server terlebih dahulu.';
+      });
+      return;
+    }
     final n = normalizeBaseUrl(_addr.text);
     if (n == null) {
       setState(() {
@@ -335,7 +342,8 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 
   Future<void> _saveAddress() async {
-    final n = normalizeBaseUrl(_addr.text);
+    final input = _addr.text.trim();
+    final n = input.isEmpty ? '' : normalizeBaseUrl(input);
     if (n == null) {
       setState(() {
         _addrOk = false;
@@ -362,6 +370,15 @@ class _SettingsPageState extends State<SettingsPage> {
       return;
     }
     _addr.text = n;
+    if (n.isEmpty) {
+      _key.clear();
+      setState(() {
+        _addrBusy = false;
+        _addrOk = true;
+        _addrMsg = 'Alamat dikosongkan. Aplikasi tidak terhubung ke server.';
+      });
+      return;
+    }
     final r = await _probeHealth(n);
     if (!mounted) return;
     setState(() {
@@ -445,8 +462,8 @@ class _SettingsPageState extends State<SettingsPage> {
           const SizedBox(height: 4),
           Text(
             kDebugMode
-                ? 'Gunakan https:// untuk server publik, atau http:// hanya untuk localhost/IP LAN lokal.'
-                : 'Masukkan alamat backend HTTPS.',
+                ? 'Masukkan alamat HTTPS atau IP LAN lokal. Kosongkan lalu simpan untuk memutus koneksi.'
+                : 'Masukkan alamat backend HTTPS. Kosongkan lalu simpan untuk memutus koneksi.',
             style: const TextStyle(fontSize: 12, color: kMuted),
           ),
           const SizedBox(height: 12),
@@ -458,7 +475,9 @@ class _SettingsPageState extends State<SettingsPage> {
             decoration: InputDecoration(
               filled: true,
               fillColor: kCard,
-              hintText: 'https://bathfan-api.example.com',
+              hintText: kDebugMode
+                  ? 'http://192.168.1.8:3000'
+                  : 'https://bathfan-api.example.com',
               border: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(14),
                 borderSide: const BorderSide(color: kLine),
@@ -571,12 +590,15 @@ class _SettingsPageState extends State<SettingsPage> {
             ],
           ),
           const SizedBox(height: 6),
-          if (trusted.isEmpty)
-            Text(
-              isEffectiveDebugMode && kBaseUrl.isEmpty
-                  ? 'Atur alamat server terlebih dahulu untuk mengaktifkan Mode Admin.'
-                  : 'Mode Admin dinonaktifkan pada build ini karena ADMIN_API_ORIGIN belum ditetapkan.',
-              style: const TextStyle(fontSize: 12, color: kMuted),
+          if (!canConfigureAdmin)
+            const Text(
+              'Mode Admin dinonaktifkan pada build ini.',
+              style: TextStyle(fontSize: 12, color: kMuted),
+            )
+          else if (activeOrigin.isEmpty)
+            const Text(
+              'Atur alamat server terlebih dahulu untuk mengaktifkan Mode Admin.',
+              style: TextStyle(fontSize: 12, color: kMuted),
             )
           else if (!originMatches)
             Text(
