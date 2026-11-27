@@ -8,8 +8,14 @@ import 'package:flutter/scheduler.dart';
 class AirFlow extends StatefulWidget {
   final Color color;
   final double speed;
+  final bool animate;
 
-  const AirFlow({super.key, required this.color, required this.speed});
+  const AirFlow({
+    super.key,
+    required this.color,
+    required this.speed,
+    required this.animate,
+  });
 
   @override
   State<AirFlow> createState() => _AirFlowState();
@@ -23,7 +29,7 @@ class _AirFlowState extends State<AirFlow> with SingleTickerProviderStateMixin {
   @override
   void initState() {
     super.initState();
-    _ticker = createTicker(_tick)..start();
+    _ticker = createTicker(_tick);
   }
 
   void _tick(Duration elapsed) {
@@ -42,8 +48,13 @@ class _AirFlowState extends State<AirFlow> with SingleTickerProviderStateMixin {
 
   @override
   Widget build(BuildContext context) {
-    // Hormati pengaturan "kurangi gerakan" di HP.
-    _ticker.muted = MediaQuery.disableAnimationsOf(context);
+    final animate = widget.animate && !MediaQuery.disableAnimationsOf(context);
+    if (animate && !_ticker.isActive) {
+      _last = Duration.zero;
+      _ticker.start();
+    } else if (!animate && _ticker.isActive) {
+      _ticker.stop();
+    }
     return IgnorePointer(
       child: RepaintBoundary(
         child: CustomPaint(
@@ -76,8 +87,8 @@ class _FlowPainter extends CustomPainter {
 
       final path = Path()..moveTo(baseX, size.height + 20);
       for (double y = size.height + 20; y >= -20; y -= 6) {
-        final x = baseX +
-            amp * math.sin(y / size.height * 2 * math.pi * 1.4 + phase);
+        final x =
+            baseX + amp * math.sin(y / size.height * 2 * math.pi * 1.4 + phase);
         path.lineTo(x, y);
       }
 

@@ -1,8 +1,9 @@
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'api_http.dart' as http;
 
+import 'api_http.dart' as http;
 import 'constants.dart';
 
 class DeviceConfig {
@@ -66,7 +67,8 @@ String durationText(int s) {
 }
 
 class SettingsPage extends StatefulWidget {
-  const SettingsPage({super.key});
+  final bool isActive;
+  const SettingsPage({super.key, this.isActive = true});
 
   @override
   State<SettingsPage> createState() => _SettingsPageState();
@@ -84,20 +86,54 @@ class _SettingsPageState extends State<SettingsPage> {
   String? _addrMsg;
   bool _addrOk = false;
   bool _addrBusy = false;
+  String? _adminMsg;
+  bool _adminOk = false;
+  bool _adminBusy = false;
+  String _activeOrigin = originOf(kBaseUrl);
 
   @override
   void initState() {
     super.initState();
     _addr.text = kBaseUrl;
-    _key.text = kApiKey;
-    _load();
+    sessionNotifier.addListener(_onSessionChange);
+    if (widget.isActive) _load();
+  }
+
+  @override
+  void didUpdateWidget(covariant SettingsPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!oldWidget.isActive && widget.isActive) {
+      _load();
+    }
   }
 
   @override
   void dispose() {
+    sessionNotifier.removeListener(_onSessionChange);
     _addr.dispose();
     _key.dispose();
     super.dispose();
+  }
+
+  void _onSessionChange() {
+    if (!mounted) return;
+    final nextOrigin = originOf(kBaseUrl);
+    final originChanged = nextOrigin != _activeOrigin;
+    final shouldReset = originChanged || !isAdminSession;
+    setState(() {
+      if (originChanged) {
+        _activeOrigin = nextOrigin;
+      }
+      if (shouldReset) {
+        _saved = null;
+        _defaults = null;
+        _edit = null;
+        _error = null;
+      }
+    });
+    if ((shouldReset || _edit == null) && widget.isActive) {
+      _load();
+    }
   }
 
   void _snack(String msg) {
@@ -114,16 +150,32 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 
   Future<void> _load() async {
+    if (kBaseUrl.isEmpty) {
+      if (mounted) setState(() => _error = 'Alamat server belum diatur.');
+      return;
+    }
+    final epoch = kSessionEpoch;
+    final origin = originOf(kBaseUrl);
     try {
       final res = await http
-          .get(Uri.parse('$kBaseUrl/api/config'))
+          .getForSession(Uri.parse('$kBaseUrl/api/config'))
           .timeout(const Duration(seconds: 8));
+      if (!mounted || epoch != kSessionEpoch || origin != originOf(kBaseUrl)) return;
+      if (res.statusCode == 401) {
+        setState(() {
+          _saved = null;
+          _defaults = null;
+          _edit = null;
+          _error = 'Pengaturan perangkat memerlukan akses Admin.';
+        });
+        return;
+      }
       if (res.statusCode != 200) throw Exception('HTTP ${res.statusCode}');
       final data = jsonDecode(res.body) as Map<String, dynamic>;
       final cfg = DeviceConfig.fromJson(data['config'] as Map<String, dynamic>);
       final def =
           DeviceConfig.fromJson(data['defaults'] as Map<String, dynamic>);
-      if (!mounted) return;
+      if (!mounted || epoch != kSessionEpoch || origin != originOf(kBaseUrl)) return;
       setState(() {
         _saved = cfg;
         _defaults = def;
@@ -131,18 +183,20 @@ class _SettingsPageState extends State<SettingsPage> {
         _error = null;
       });
     } catch (_) {
-      if (!mounted) return;
+      if (!mounted || epoch != kSessionEpoch || origin != originOf(kBaseUrl)) return;
       setState(() => _error = 'Tidak bisa mengambil pengaturan');
     }
   }
 
   Future<void> _save() async {
     final e = _edit;
-    if (e == null) return;
+    if (e == null || !isAdminSession) return;
+    final epoch = kSessionEpoch;
+    final origin = originOf(kBaseUrl);
     setState(() => _busy = true);
     try {
       final res = await http
-          .put(
+          .putAdmin(
             Uri.parse('$kBaseUrl/api/config'),
             headers: {'Content-Type': 'application/json'},
             body: jsonEncode({
@@ -155,13 +209,13 @@ class _SettingsPageState extends State<SettingsPage> {
             }),
           )
           .timeout(const Duration(seconds: 8));
+      if (!mounted || epoch != kSessionEpoch || origin != originOf(kBaseUrl)) return;
       if (res.statusCode != 200) {
         _snack(_message(res));
         return;
       }
       final data = jsonDecode(res.body) as Map<String, dynamic>;
       final cfg = DeviceConfig.fromJson(data['config'] as Map<String, dynamic>);
-      if (!mounted) return;
       setState(() {
         _saved = cfg;
         _edit = cfg;
@@ -176,7 +230,10 @@ class _SettingsPageState extends State<SettingsPage> {
 
   Future<void> _reset() async {
     final d = _defaults;
-    if (d == null) return;
+    if (d == null || !isAdminSession) return;
+    final epoch = kSessionEpoch;
+    final origin = originOf(kBaseUrl);
+
     final ok = await showDialog<bool>(
       context: context,
       builder: (c) => AlertDialog(
@@ -198,23 +255,30 @@ class _SettingsPageState extends State<SettingsPage> {
         ],
       ),
     );
-    if (ok != true || !mounted) return;
+    if (ok != true ||
+        !mounted ||
+        epoch != kSessionEpoch ||
+        !isAdminSession ||
+        origin != originOf(kBaseUrl)) {
+      return;
+    }
+
     setState(() => _busy = true);
     try {
       final res = await http
-          .post(
+          .postAdmin(
             Uri.parse('$kBaseUrl/api/config/reset'),
             headers: {'Content-Type': 'application/json'},
             body: '{}',
           )
           .timeout(const Duration(seconds: 8));
+      if (!mounted || epoch != kSessionEpoch || origin != originOf(kBaseUrl)) return;
       if (res.statusCode != 200) {
         _snack(_message(res));
         return;
       }
       final data = jsonDecode(res.body) as Map<String, dynamic>;
       final cfg = DeviceConfig.fromJson(data['config'] as Map<String, dynamic>);
-      if (!mounted) return;
       setState(() {
         _saved = cfg;
         _edit = cfg;
@@ -227,31 +291,39 @@ class _SettingsPageState extends State<SettingsPage> {
     }
   }
 
-  Future<(bool, String)> _probe(String base, String key) async {
+  Future<(bool, String)> _probeHealth(String base) async {
     try {
       final res = await http
-          .get(Uri.parse('$base/api/status'), headers: {'X-API-Key': key})
+          .getPublic(Uri.parse('$base/health'))
           .timeout(const Duration(seconds: 5));
       if (res.statusCode != 200) {
         return (false, 'Server menjawab HTTP ${res.statusCode}');
       }
       final j = jsonDecode(res.body);
-      if (j is! Map<String, dynamic> || !j.containsKey('online')) {
+      if (j is! Map<String, dynamic> || j['ok'] != true) {
         return (false, 'Alamat ini bukan backend Bathfan');
       }
-      final on = j['online'] == true ? 'online' : 'offline';
-      return (true, 'Terhubung. Perangkat $on');
+      return (true, 'Server dapat dijangkau');
     } catch (_) {
-      return (false, 'Tidak bisa dijangkau. Periksa alamat, WiFi, dan firewall');
+      return (false, 'Tidak bisa dijangkau. Periksa alamat dan koneksi');
     }
   }
 
   Future<void> _testAddress() async {
+    if (_addr.text.trim().isEmpty) {
+      setState(() {
+        _addrOk = false;
+        _addrMsg = 'Masukkan alamat server terlebih dahulu.';
+      });
+      return;
+    }
     final n = normalizeBaseUrl(_addr.text);
     if (n == null) {
       setState(() {
         _addrOk = false;
-        _addrMsg = 'Alamat tidak valid';
+        _addrMsg = kDebugMode
+            ? 'Alamat tidak valid (publik wajib https://)'
+            : 'Alamat tidak valid (wajib https://)';
       });
       return;
     }
@@ -260,7 +332,7 @@ class _SettingsPageState extends State<SettingsPage> {
       _addrOk = true;
       _addrMsg = 'Menguji...';
     });
-    final r = await _probe(n, _key.text.trim());
+    final r = await _probeHealth(n);
     if (!mounted) return;
     setState(() {
       _addrBusy = false;
@@ -270,11 +342,14 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 
   Future<void> _saveAddress() async {
-    final n = normalizeBaseUrl(_addr.text);
+    final input = _addr.text.trim();
+    final n = input.isEmpty ? '' : normalizeBaseUrl(input);
     if (n == null) {
       setState(() {
         _addrOk = false;
-        _addrMsg = 'Alamat tidak valid';
+        _addrMsg = kDebugMode
+            ? 'Alamat tidak valid (publik wajib https://)'
+            : 'Alamat tidak valid (wajib https://)';
       });
       return;
     }
@@ -282,8 +357,9 @@ class _SettingsPageState extends State<SettingsPage> {
       _addrBusy = true;
       _addrOk = true;
       _addrMsg = 'Menyimpan...';
+      _adminMsg = null;
     });
-    final saved = await saveBaseUrl(n) && await saveApiKey(_key.text);
+    final saved = await setServerAddress(n);
     if (!mounted) return;
     if (!saved) {
       setState(() {
@@ -294,7 +370,16 @@ class _SettingsPageState extends State<SettingsPage> {
       return;
     }
     _addr.text = n;
-    final r = await _probe(n, _key.text.trim());
+    if (n.isEmpty) {
+      _key.clear();
+      setState(() {
+        _addrBusy = false;
+        _addrOk = true;
+        _addrMsg = 'Alamat dikosongkan. Aplikasi tidak terhubung ke server.';
+      });
+      return;
+    }
+    final r = await _probeHealth(n);
     if (!mounted) return;
     setState(() {
       _addrBusy = false;
@@ -305,8 +390,57 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 
   Future<void> _resetAddress() async {
+    if (kDefaultBaseUrl.isEmpty) {
+      setState(() {
+        _addrOk = false;
+        _addrMsg = 'Alamat bawaan belum dikonfigurasi pada build ini.';
+      });
+      return;
+    }
     _addr.text = kDefaultBaseUrl;
     await _saveAddress();
+  }
+
+  Future<void> _activateAdmin() async {
+    final key = _key.text.trim();
+    if (key.isEmpty) {
+      setState(() {
+        _adminOk = false;
+        _adminMsg = 'Masukkan kunci Admin terlebih dahulu.';
+      });
+      return;
+    }
+    setState(() {
+      _adminBusy = true;
+      _adminMsg = null;
+    });
+
+    final ok = await verifyAndActivateAdmin(key);
+    if (!mounted) return;
+    _key.clear();
+    setState(() {
+      _adminBusy = false;
+      _adminOk = ok;
+      _adminMsg = ok
+          ? 'Mode Admin aktif.'
+          : 'Verifikasi gagal. Pastikan kunci benar dan server cocok.';
+    });
+    if (ok) _load();
+  }
+
+  Future<void> _logoutAdmin() async {
+    setState(() {
+      _adminBusy = true;
+      _adminMsg = null;
+    });
+    await clearAdminSession();
+    if (!mounted) return;
+    setState(() {
+      _adminBusy = false;
+      _adminOk = true;
+      _adminMsg = 'Keluar dari Mode Admin.';
+    });
+    _load();
   }
 
   Widget _addressCard() {
@@ -326,10 +460,11 @@ class _SettingsPageState extends State<SettingsPage> {
         children: [
           const Text('Alamat server', style: TextStyle(fontSize: 15)),
           const SizedBox(height: 4),
-          const Text(
-            'Alamat backend di laptop. Isi dengan IP laptop di WiFi yang sama, '
-            'misalnya 192.168.1.8 (port 3000 ditambahkan otomatis).',
-            style: TextStyle(fontSize: 12, color: kMuted),
+          Text(
+            kDebugMode
+                ? 'Masukkan alamat HTTPS atau IP LAN lokal. Kosongkan lalu simpan untuk memutus koneksi.'
+                : 'Masukkan alamat backend HTTPS. Kosongkan lalu simpan untuk memutus koneksi.',
+            style: const TextStyle(fontSize: 12, color: kMuted),
           ),
           const SizedBox(height: 12),
           TextField(
@@ -340,31 +475,15 @@ class _SettingsPageState extends State<SettingsPage> {
             decoration: InputDecoration(
               filled: true,
               fillColor: kCard,
-              hintText: 'http://192.168.1.8:3000',
+              hintText: kDebugMode
+                  ? 'http://192.168.1.8:3000'
+                  : 'https://bathfan-api.example.com',
               border: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(14),
                 borderSide: const BorderSide(color: kLine),
               ),
             ),
           ),
-
-          const SizedBox(height: 12),
-          TextField(
-            controller: _key,
-            obscureText: true,
-            autocorrect: false,
-            enableSuggestions: false,
-            decoration: InputDecoration(
-              labelText: 'Kunci API',
-              filled: true,
-              fillColor: kCard,
-              border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(14),
-                borderSide: const BorderSide(color: kLine),
-              ),
-            ),
-          ),
-
           if (_addrMsg != null)
             Padding(
               padding: const EdgeInsets.only(top: 10),
@@ -418,13 +537,144 @@ class _SettingsPageState extends State<SettingsPage> {
               ),
             ],
           ),
-          Align(
-            alignment: Alignment.centerLeft,
-            child: TextButton(
-              onPressed: _addrBusy ? null : _resetAddress,
-              child: const Text('Pakai alamat bawaan'),
+          if (kDefaultBaseUrl.isNotEmpty)
+            Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton(
+                onPressed: _addrBusy ? null : _resetAddress,
+                child: const Text('Pakai alamat bawaan'),
+              ),
             ),
+        ],
+      ),
+    );
+  }
+
+  Widget _adminCard() {
+    final trusted = kTrustedAdminOrigin;
+    final activeOrigin = originOf(kBaseUrl);
+    final originMatches = trusted.isNotEmpty && activeOrigin == trusted;
+    final admin = isAdminSession;
+
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(color: kLine),
+        gradient: const LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [Color(0xFF15325C), Color(0xFF0F2646)],
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Expanded(
+                child: Text(
+                  'Akses Admin (Khusus Tim)',
+                  style: TextStyle(fontSize: 15),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Text(
+                admin ? 'Aktif' : 'Pengunjung',
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w700,
+                  color: admin ? const Color(0xFF4ADE80) : kMuted,
+                ),
+              ),
+            ],
           ),
+          const SizedBox(height: 6),
+          if (!canConfigureAdmin)
+            const Text(
+              'Mode Admin dinonaktifkan pada build ini.',
+              style: TextStyle(fontSize: 12, color: kMuted),
+            )
+          else if (activeOrigin.isEmpty)
+            const Text(
+              'Atur alamat server terlebih dahulu untuk mengaktifkan Mode Admin.',
+              style: TextStyle(fontSize: 12, color: kMuted),
+            )
+          else if (!originMatches)
+            Text(
+              'Kunci Admin hanya berlaku pada server resmi: $trusted',
+              style: const TextStyle(fontSize: 12, color: kMuted),
+            )
+          else if (admin) ...[
+            const Text(
+              'Perangkat ini terhubung sebagai Admin. Kendali fan, jadwal, dan konfigurasi aktif.',
+              style: TextStyle(fontSize: 12, color: kMuted),
+            ),
+            const SizedBox(height: 12),
+            OutlinedButton.icon(
+              onPressed: _adminBusy ? null : _logoutAdmin,
+              icon: const Icon(Icons.logout),
+              label: const Text('Keluar Mode Admin'),
+              style: OutlinedButton.styleFrom(
+                foregroundColor: const Color(0xFFF87171),
+                side: const BorderSide(color: Color(0xFFF87171), width: 1.5),
+                minimumSize: const Size.fromHeight(48),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(14),
+                ),
+              ),
+            ),
+          ] else ...[
+            const Text(
+              'Masukkan X-API-Key untuk mengendalikan perangkat pada server resmi.',
+              style: TextStyle(fontSize: 12, color: kMuted),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _key,
+              obscureText: true,
+              autocorrect: false,
+              enableSuggestions: false,
+              decoration: InputDecoration(
+                labelText: 'Kunci Admin',
+                filled: true,
+                fillColor: kCard,
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(14),
+                  borderSide: const BorderSide(color: kLine),
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+            FilledButton(
+              onPressed: _adminBusy ? null : _activateAdmin,
+              style: FilledButton.styleFrom(
+                backgroundColor: kAccent,
+                foregroundColor: const Color(0xFF08213F),
+                minimumSize: const Size.fromHeight(48),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(14),
+                ),
+              ),
+              child: Text(
+                _adminBusy ? 'Memverifikasi...' : 'Aktifkan Mode Admin',
+                style: const TextStyle(fontWeight: FontWeight.w700),
+              ),
+            ),
+          ],
+          if (_adminMsg != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 10),
+              child: Text(
+                _adminMsg!,
+                style: TextStyle(
+                  fontSize: 13,
+                  color: _adminOk
+                      ? const Color(0xFF4ADE80)
+                      : const Color(0xFFF87171),
+                ),
+              ),
+            ),
         ],
       ),
     );
@@ -438,7 +688,7 @@ class _SettingsPageState extends State<SettingsPage> {
     required double min,
     required double max,
     required int divisions,
-    required ValueChanged<double> onChanged,
+    required ValueChanged<double>? onChanged,
   }) {
     return Container(
       padding: const EdgeInsets.fromLTRB(16, 14, 16, 8),
@@ -473,7 +723,7 @@ class _SettingsPageState extends State<SettingsPage> {
             min: min,
             max: max,
             divisions: divisions,
-            onChanged: _busy ? null : onChanged,
+            onChanged: (_busy || onChanged == null) ? null : onChanged,
           ),
           Padding(
             padding: const EdgeInsets.only(bottom: 6),
@@ -486,6 +736,7 @@ class _SettingsPageState extends State<SettingsPage> {
 
   @override
   Widget build(BuildContext context) {
+    final admin = isAdminSession;
     final e = _edit;
     final children = <Widget>[
       const Text(
@@ -494,20 +745,21 @@ class _SettingsPageState extends State<SettingsPage> {
       ),
       const SizedBox(height: 8),
       const Text(
-        'Perubahan dikirim ke perangkat dan berlaku dalam beberapa detik.',
+        'Perubahan ambang dikirim ke perangkat dan berlaku dalam beberapa detik.',
         style: TextStyle(fontSize: 13, color: kMuted),
       ),
       const SizedBox(height: 16),
+      _addressCard(),
+      const SizedBox(height: 16),
+      _adminCard(),
+      const SizedBox(height: 16),
     ];
-
-    children.add(_addressCard());
-    children.add(const SizedBox(height: 16));
 
     if (e == null) {
       children.add(
         Center(
           child: Padding(
-            padding: const EdgeInsets.only(top: 40),
+            padding: const EdgeInsets.only(top: 28),
             child: Text(_error ?? 'Memuat...', style: const TextStyle(color: kMuted)),
           ),
         ),
@@ -520,6 +772,18 @@ class _SettingsPageState extends State<SettingsPage> {
       final atDefault = !changed && e.same(d);
       final prMax = e.postRunSec > 600 ? 3600.0 : 600.0;
 
+      if (!admin) {
+        children.add(
+          const Padding(
+            padding: EdgeInsets.only(bottom: 12),
+            child: Text(
+              'Mode Pengunjung: parameter perangkat ditampilkan hanya-baca.',
+              style: TextStyle(fontSize: 12, color: kMuted),
+            ),
+          ),
+        );
+      }
+
       children.addAll([
         _tile(
           title: 'Fan menyala di atas',
@@ -529,7 +793,7 @@ class _SettingsPageState extends State<SettingsPage> {
           min: 45,
           max: 85,
           divisions: 40,
-          onChanged: (v) => setState(() => _edit = e.copyWith(humOn: v.roundToDouble())),
+          onChanged: admin ? (v) => setState(() => _edit = e.copyWith(humOn: v.roundToDouble())) : null,
         ),
         const SizedBox(height: 12),
         _tile(
@@ -540,7 +804,7 @@ class _SettingsPageState extends State<SettingsPage> {
           min: 40,
           max: 80,
           divisions: 40,
-          onChanged: (v) => setState(() => _edit = e.copyWith(humOff: v.roundToDouble())),
+          onChanged: admin ? (v) => setState(() => _edit = e.copyWith(humOff: v.roundToDouble())) : null,
         ),
         if (!gapOk)
           const Padding(
@@ -559,7 +823,7 @@ class _SettingsPageState extends State<SettingsPage> {
           min: 0,
           max: prMax,
           divisions: (prMax / 10).round(),
-          onChanged: (v) => setState(() => _edit = e.copyWith(postRunSec: v.round())),
+          onChanged: admin ? (v) => setState(() => _edit = e.copyWith(postRunSec: v.round())) : null,
         ),
         const SizedBox(height: 12),
         _tile(
@@ -570,9 +834,8 @@ class _SettingsPageState extends State<SettingsPage> {
           min: 30,
           max: 100,
           divisions: 14,
-          onChanged: (v) => setState(() => _edit = e.copyWith(maxPwm: v.round())),
+          onChanged: admin ? (v) => setState(() => _edit = e.copyWith(maxPwm: v.round())) : null,
         ),
-        
         const SizedBox(height: 12),
         _tile(
           title: 'Asap menyala di atas',
@@ -582,7 +845,7 @@ class _SettingsPageState extends State<SettingsPage> {
           min: 100,
           max: 1000,
           divisions: 18,
-          onChanged: (v) => setState(() => _edit = e.copyWith(smokeOn: v.round())),
+          onChanged: admin ? (v) => setState(() => _edit = e.copyWith(smokeOn: v.round())) : null,
         ),
         const SizedBox(height: 12),
         _tile(
@@ -593,7 +856,7 @@ class _SettingsPageState extends State<SettingsPage> {
           min: 30,
           max: 500,
           divisions: 47,
-          onChanged: (v) => setState(() => _edit = e.copyWith(smokeOff: v.round())),
+          onChanged: admin ? (v) => setState(() => _edit = e.copyWith(smokeOff: v.round())) : null,
         ),
         if (!smokeGapOk)
           const Padding(
@@ -603,30 +866,31 @@ class _SettingsPageState extends State<SettingsPage> {
               style: TextStyle(color: Color(0xFFF87171), fontSize: 13),
             ),
           ),
-
-        const SizedBox(height: 20),
-        FilledButton(
-          onPressed: (_busy || !changed || !gapOk || !smokeGapOk) ? null : _save,
-          style: FilledButton.styleFrom(
-            backgroundColor: kAccent,
-            foregroundColor: const Color(0xFF08213F),
-            minimumSize: const Size.fromHeight(52),
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+        if (admin) ...[
+          const SizedBox(height: 20),
+          FilledButton(
+            onPressed: (_busy || !changed || !gapOk || !smokeGapOk) ? null : _save,
+            style: FilledButton.styleFrom(
+              backgroundColor: kAccent,
+              foregroundColor: const Color(0xFF08213F),
+              minimumSize: const Size.fromHeight(52),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+            ),
+            child: const Text('Simpan pengaturan', style: TextStyle(fontWeight: FontWeight.w700)),
           ),
-          child: const Text('Simpan pengaturan', style: TextStyle(fontWeight: FontWeight.w700)),
-        ),
-        const SizedBox(height: 12),
-        OutlinedButton.icon(
-          onPressed: (_busy || atDefault) ? null : _reset,
-          icon: const Icon(Icons.restart_alt),
-          label: const Text('Kembalikan ke bawaan'),
-          style: OutlinedButton.styleFrom(
-            foregroundColor: kAccent,
-            side: BorderSide(color: (_busy || atDefault) ? kLine : kAccent, width: 2),
-            minimumSize: const Size.fromHeight(52),
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+          const SizedBox(height: 12),
+          OutlinedButton.icon(
+            onPressed: (_busy || atDefault) ? null : _reset,
+            icon: const Icon(Icons.restart_alt),
+            label: const Text('Kembalikan ke bawaan'),
+            style: OutlinedButton.styleFrom(
+              foregroundColor: kAccent,
+              side: BorderSide(color: (_busy || atDefault) ? kLine : kAccent, width: 2),
+              minimumSize: const Size.fromHeight(52),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+            ),
           ),
-        ),
+        ],
       ]);
     }
 

@@ -1,4 +1,5 @@
-const { pool } = require('./db');
+const { pool: defaultPool } = require('./db');
+const { getAllowedDevices } = require('./config');
 
 const TICK_MS = 30000;
 const HEARTBEAT_MS = 55000;
@@ -41,30 +42,38 @@ function isActive(s, now) {
   );
 }
 
-function startScheduler(client) {
+function createScheduler(client, { pool = defaultPool, env = process.env, autoStart = true } = {}) {
   const last = new Map(); // device -> { active, at }
+  let timer = null;
 
-  async function tick() {
+  async function tick(nowDate = new Date()) {
     if (!client.connected) return;
     try {
-      const { rows } = await pool.query(`
-        SELECT device_id, start_time::text AS start_time,
-               end_time::text AS end_time, days
-        FROM schedules
-        WHERE enabled = true
-      `);
-      const byDevice = new Map([['fan01', []]]);
+      const allowed = getAllowedDevices(env);
+      const allowedSet = new Set(allowed);
+
       for (const d of last.keys()) {
-        if (!byDevice.has(d)) byDevice.set(d, []);
+        if (!allowedSet.has(d)) last.delete(d);
       }
+
+      const { rows } = await pool.query(
+        `SELECT device_id, start_time::text AS start_time,
+                end_time::text AS end_time, days
+         FROM schedules
+         WHERE enabled = true AND device_id = ANY($1::text[])`,
+        [allowed]
+      );
+
+      const byDevice = new Map(allowed.map((d) => [d, []]));
       for (const r of rows) {
-        if (!byDevice.has(r.device_id)) byDevice.set(r.device_id, []);
+        if (!allowedSet.has(r.device_id)) continue;
         byDevice.get(r.device_id).push(r);
       }
 
-      const now = nowInJakarta();
-      const t = Date.now();
+      const now = nowInJakarta(nowDate);
+      const t = nowDate.getTime();
       for (const [device, list] of byDevice) {
+        if (!allowedSet.has(device)) continue;
         const active = list.some((s) => isActive(s, now));
         const prev = last.get(device);
         const changed = !prev || prev.active !== active;
@@ -72,7 +81,7 @@ function startScheduler(client) {
           client.publish(
             `bathfan/${device}/cmd/standby`,
             JSON.stringify({ active }),
-            { qos: 1 }
+            { qos: 1, retain: false }
           );
           if (changed) {
             console.log(`Standby [${device}] ${active ? 'AKTIF' : 'tidak aktif'}`);
@@ -85,8 +94,23 @@ function startScheduler(client) {
     }
   }
 
-  tick();
-  setInterval(tick, TICK_MS);
+  if (autoStart) {
+    tick();
+    timer = setInterval(() => tick(), TICK_MS);
+    if (typeof timer.unref === 'function') timer.unref();
+  }
+
+  return {
+    tick,
+    stop() {
+      if (timer) clearInterval(timer);
+      timer = null;
+    },
+  };
 }
 
-module.exports = { startScheduler };
+function startScheduler(client, options) {
+  return createScheduler(client, { ...options, autoStart: true });
+}
+
+module.exports = { startScheduler, createScheduler, isActive, nowInJakarta };

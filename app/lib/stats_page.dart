@@ -1,19 +1,56 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
-import 'api_http.dart' as http;
 
+import 'api_http.dart' as http;
 import 'constants.dart';
 
 const Color kFanColor = Color(0xFFFBBF24);
+const Color kSmokeColor = Color(0xFF34D399);
+const Color kSmokeAlertColor = Color(0xFFEF4444);
 
 class HistoryPoint {
   final DateTime t;
   final double humidity;
   final double temperature;
   final int fanPwm;
-  HistoryPoint(this.t, this.humidity, this.temperature, this.fanPwm);
+  final int? smoke;
+  final bool smokeAlert;
+
+  HistoryPoint(
+    this.t,
+    this.humidity,
+    this.temperature,
+    this.fanPwm, {
+    this.smoke,
+    this.smokeAlert = false,
+  });
+}
+
+class SmokeAxisBounds {
+  final double minY;
+  final double maxY;
+  const SmokeAxisBounds(this.minY, this.maxY);
+}
+
+SmokeAxisBounds computeSmokeYAxisBounds(Iterable<int?> values) {
+  int? minVal;
+  int? maxVal;
+  for (final v in values) {
+    if (v == null) continue;
+    minVal = minVal == null ? v : math.min(minVal, v);
+    maxVal = maxVal == null ? v : math.max(maxVal, v);
+  }
+  if (minVal == null || maxVal == null) {
+    return const SmokeAxisBounds(0, 300);
+  }
+  final rawMin = math.min(0, minVal);
+  final rawMax = math.max(300, maxVal);
+  final minY = (rawMin / 50).floor() * 50.0;
+  final maxY = (rawMax / 50).ceil() * 50.0;
+  return SmokeAxisBounds(minY, maxY <= minY ? minY + 100 : maxY);
 }
 
 class _RangeInfo {
@@ -40,7 +77,9 @@ String _fmtDuration(int sec) {
 }
 
 class StatsPage extends StatefulWidget {
-  const StatsPage({super.key});
+  final bool isActive;
+  final ({String device, String id})? latestDemo;
+  const StatsPage({super.key, this.isActive = true, this.latestDemo});
 
   @override
   State<StatsPage> createState() => _StatsPageState();
@@ -53,27 +92,106 @@ class _StatsPageState extends State<StatsPage> {
   String? _error;
   Timer? _timer;
   int _reqId = 0;
+  String _activeOrigin = originOf(kBaseUrl);
+  bool _showDemo = false;
 
   @override
   void initState() {
     super.initState();
-    _load();
-    _timer = Timer.periodic(const Duration(seconds: 15), (_) => _load());
+    sessionNotifier.addListener(_onSessionChange);
+    _syncPolling(immediate: widget.isActive);
+  }
+
+  @override
+  void didUpdateWidget(covariant StatsPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final changedRun = _showDemo && widget.latestDemo != oldWidget.latestDemo;
+    if (changedRun) {
+      _showDemo = widget.latestDemo != null;
+      _reqId++;
+      _points = [];
+      _loaded = false;
+      _error = null;
+    }
+    if (oldWidget.isActive != widget.isActive) {
+      _syncPolling(immediate: widget.isActive);
+    } else if (changedRun && widget.isActive) {
+      _load();
+    }
   }
 
   @override
   void dispose() {
+    sessionNotifier.removeListener(_onSessionChange);
     _timer?.cancel();
     super.dispose();
   }
 
+  void _onSessionChange() {
+    if (!mounted) return;
+    final nextOrigin = originOf(kBaseUrl);
+    final originChanged = nextOrigin != _activeOrigin;
+    if (originChanged || !isAdminSession) {
+      setState(() {
+        _activeOrigin = nextOrigin;
+        if (originChanged) _showDemo = false;
+        _points = [];
+        _loaded = false;
+        _error = null;
+      });
+      if (widget.isActive) _load();
+    } else if (widget.isActive && _points.isEmpty) {
+      _load();
+    }
+  }
+
+  void _syncPolling({required bool immediate}) {
+    _timer?.cancel();
+    _timer = null;
+    if (!widget.isActive) return;
+    if (immediate) _load();
+    _timer = Timer.periodic(const Duration(seconds: 15), (_) => _load());
+  }
+
   Future<void> _load() async {
+    if (kBaseUrl.isEmpty) {
+      if (mounted) setState(() => _error = 'Alamat server belum diatur');
+      return;
+    }
     final id = ++_reqId;
+    final epoch = kSessionEpoch;
+    final origin = originOf(kBaseUrl);
     final r = _ranges[_rangeIndex];
+    final demo = _showDemo ? widget.latestDemo : null;
+    final uri = Uri.parse('$kBaseUrl/api/history').replace(
+      queryParameters: {
+        'range': r.key,
+        if (demo != null) ...{
+          'source': 'demo',
+          'run_id': demo.id,
+          'device': demo.device,
+        },
+      },
+    );
+
     try {
       final res = await http
-          .get(Uri.parse('$kBaseUrl/api/history?range=${r.key}'))
+          .getForSession(uri)
           .timeout(const Duration(seconds: 8));
+      if (!mounted ||
+          id != _reqId ||
+          epoch != kSessionEpoch ||
+          origin != originOf(kBaseUrl)) {
+        return;
+      }
+      if (res.statusCode == 401) {
+        setState(() {
+          _points = [];
+          _loaded = false;
+          _error = 'Riwayat memerlukan akses Admin di Pengaturan';
+        });
+        return;
+      }
       if (res.statusCode != 200) throw Exception('HTTP ${res.statusCode}');
       final data = jsonDecode(res.body) as Map<String, dynamic>;
       final list = (data['points'] as List).map((e) {
@@ -83,16 +201,28 @@ class _StatsPageState extends State<StatsPage> {
           (m['humidity'] as num).toDouble(),
           (m['temperature'] as num).toDouble(),
           (m['fan_pwm'] as num).toInt(),
+          smoke: (m['smoke'] as num?)?.toInt(),
+          smokeAlert: m['smoke_alert'] == true,
         );
       }).toList();
-      if (!mounted || id != _reqId) return;
+      if (!mounted ||
+          id != _reqId ||
+          epoch != kSessionEpoch ||
+          origin != originOf(kBaseUrl)) {
+        return;
+      }
       setState(() {
         _points = list;
         _loaded = true;
         _error = null;
       });
-    } catch (e) {
-      if (!mounted || id != _reqId) return;
+    } catch (_) {
+      if (!mounted ||
+          id != _reqId ||
+          epoch != kSessionEpoch ||
+          origin != originOf(kBaseUrl)) {
+        return;
+      }
       setState(() => _error = 'Tidak bisa mengambil data riwayat');
     }
   }
@@ -120,6 +250,34 @@ class _StatsPageState extends State<StatsPage> {
         ),
       ),
       child: child,
+    );
+  }
+
+  void _selectSource(bool demo) {
+    if (_showDemo == demo) return;
+    _reqId++;
+    setState(() {
+      _showDemo = demo;
+      _rangeIndex = 0;
+      _points = [];
+      _loaded = false;
+      _error = null;
+    });
+    _load();
+  }
+
+  Widget _sourceChip(bool demo, String label) {
+    final selected = _showDemo == demo;
+    return ChoiceChip(
+      label: Text(label),
+      selected: selected,
+      onSelected: (_) => _selectSource(demo),
+      showCheckmark: false,
+      backgroundColor: kCard,
+      selectedColor: kAccent,
+      labelStyle: TextStyle(color: selected ? const Color(0xFF08213F) : kMuted),
+      side: const BorderSide(color: kLine),
+      shape: const StadiumBorder(),
     );
   }
 
@@ -200,14 +358,18 @@ class _StatsPageState extends State<StatsPage> {
     String avg = '--', peak = '--', fan = '--';
     if (_points.isNotEmpty) {
       final hs = _points.map((p) => p.humidity);
-      avg = '${(hs.reduce((a, b) => a + b) / _points.length).toStringAsFixed(0)} %';
+      avg =
+          '${(hs.reduce((a, b) => a + b) / _points.length).toStringAsFixed(0)} %';
       peak = '${hs.reduce((a, b) => a > b ? a : b).toStringAsFixed(0)} %';
       final active = _points.where((p) => p.fanPwm > 0).length;
       fan = _fmtDuration(active * r.bucketSec);
     }
 
-    final emptyText = _error ??
-        (_loaded ? 'Belum ada data pada rentang ini' : 'Memuat...');
+    final hasSmokeData = _points.any((p) => p.smoke != null || p.smokeAlert);
+    final smokeBounds = computeSmokeYAxisBounds(_points.map((p) => p.smoke));
+
+    final emptyText =
+        _error ?? (_loaded ? 'Belum ada data pada rentang ini' : 'Memuat...');
 
     return Scaffold(
       body: SafeArea(
@@ -219,6 +381,16 @@ class _StatsPageState extends State<StatsPage> {
               style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700),
             ),
             const SizedBox(height: 16),
+            if (widget.latestDemo != null) ...[
+              Wrap(
+                spacing: 8,
+                children: [
+                  _sourceChip(false, 'Sensor fisik'),
+                  _sourceChip(true, 'Demo terakhir'),
+                ],
+              ),
+              const SizedBox(height: 8),
+            ],
             Row(children: [for (int i = 0; i < _ranges.length; i++) _chip(i)]),
             const SizedBox(height: 16),
             _card(
@@ -271,6 +443,61 @@ class _StatsPageState extends State<StatsPage> {
               'Durasi fan aktif adalah perkiraan dari data yang terekam.',
               style: TextStyle(fontSize: 11, color: kMuted),
             ),
+            if (_showDemo) ...[
+              const SizedBox(height: 16),
+              _card(
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'Sensor Asap (MQ-2 Delta)',
+                      style: TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    SizedBox(
+                      height: 190,
+                      width: double.infinity,
+                      child: _points.isEmpty || !hasSmokeData
+                          ? Center(
+                              child: Text(
+                                _points.isEmpty
+                                    ? emptyText
+                                    : 'Belum ada data MQ-2 siap ukur pada rentang ini',
+                                style: const TextStyle(color: kMuted),
+                                textAlign: TextAlign.center,
+                              ),
+                            )
+                          : CustomPaint(
+                              painter: _SmokeChartPainter(
+                                points: _points,
+                                tMin: tMin,
+                                tMax: now,
+                                bucketSec: r.bucketSec,
+                                dateLabels: r.key == '7d',
+                                bounds: smokeBounds,
+                              ),
+                            ),
+                    ),
+                    const SizedBox(height: 10),
+                    Wrap(
+                      spacing: 14,
+                      runSpacing: 6,
+                      alignment: WrapAlignment.center,
+                      children: [
+                        _legend(kSmokeColor, 'Delta MQ-2'),
+                        _legend(
+                          kSmokeAlertColor,
+                          'Pernah alarm pada rentang ini',
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ],
           ],
         ),
       ),
@@ -309,8 +536,9 @@ class _ChartPainter extends CustomPainter {
     tp.paint(c, Offset(alignRight ? o.dx - tp.width : o.dx, o.dy));
   }
 
-  String _label(DateTime t) =>
-      dateLabels ? '${_two(t.day)}/${_two(t.month)}' : '${_two(t.hour)}:${_two(t.minute)}';
+  String _label(DateTime t) => dateLabels
+      ? '${_two(t.day)}/${_two(t.month)}'
+      : '${_two(t.hour)}:${_two(t.minute)}';
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -338,7 +566,12 @@ class _ChartPainter extends CustomPainter {
     final yLabel = size.height - _bottom + 6;
     _text(canvas, _label(tMin), Offset(_left, yLabel));
     _text(canvas, _label(mid), Offset(_left + w / 2 - 14, yLabel));
-    _text(canvas, _label(tMax), Offset(size.width - _right, yLabel), alignRight: true);
+    _text(
+      canvas,
+      _label(tMax),
+      Offset(size.width - _right, yLabel),
+      alignRight: true,
+    );
 
     _series(canvas, kAccent, (p) => p.humidity, xOf, yOf);
     _series(canvas, kFanColor, (p) => p.fanPwm.toDouble(), xOf, yOf);
@@ -387,4 +620,147 @@ class _ChartPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant _ChartPainter old) => true;
+}
+
+class _SmokeChartPainter extends CustomPainter {
+  final List<HistoryPoint> points;
+  final DateTime tMin;
+  final DateTime tMax;
+  final int bucketSec;
+  final bool dateLabels;
+  final SmokeAxisBounds bounds;
+
+  _SmokeChartPainter({
+    required this.points,
+    required this.tMin,
+    required this.tMax,
+    required this.bucketSec,
+    required this.dateLabels,
+    required this.bounds,
+  });
+
+  static const double _left = 40;
+  static const double _right = 8;
+  static const double _top = 8;
+  static const double _bottom = 22;
+
+  void _text(Canvas c, String s, Offset o, {bool alignRight = false}) {
+    final tp = TextPainter(
+      text: TextSpan(
+        text: s,
+        style: const TextStyle(color: kMuted, fontSize: 10),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    tp.paint(c, Offset(alignRight ? o.dx - tp.width : o.dx, o.dy));
+  }
+
+  String _label(DateTime t) => dateLabels
+      ? '${_two(t.day)}/${_two(t.month)}'
+      : '${_two(t.hour)}:${_two(t.minute)}';
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final w = size.width - _left - _right;
+    final h = size.height - _top - _bottom;
+    final spanMs = tMax.difference(tMin).inMilliseconds.toDouble();
+    final ySpan = bounds.maxY - bounds.minY;
+
+    double xOf(DateTime t) {
+      final f = (t.difference(tMin).inMilliseconds / spanMs).clamp(0.0, 1.0);
+      return _left + w * f;
+    }
+
+    double yOf(double v) {
+      final f = ((v - bounds.minY) / ySpan).clamp(0.0, 1.0);
+      return _top + h * (1 - f);
+    }
+
+    final grid = Paint()
+      ..color = kLine
+      ..strokeWidth = 1;
+
+    for (int i = 0; i <= 4; i++) {
+      final v = bounds.minY + (ySpan * i / 4);
+      final y = yOf(v);
+      canvas.drawLine(Offset(_left, y), Offset(size.width - _right, y), grid);
+      _text(canvas, '${v.round()}', Offset(_left - 6, y - 6), alignRight: true);
+    }
+
+    if (bounds.minY < 0) {
+      final zeroY = yOf(0);
+      final zeroPaint = Paint()
+        ..color = kMuted.withValues(alpha: 0.45)
+        ..strokeWidth = 1.2;
+      canvas.drawLine(
+        Offset(_left, zeroY),
+        Offset(size.width - _right, zeroY),
+        zeroPaint,
+      );
+    }
+
+    final mid = tMin.add(Duration(milliseconds: (spanMs / 2).round()));
+    final yLabel = size.height - _bottom + 6;
+    _text(canvas, _label(tMin), Offset(_left, yLabel));
+    _text(canvas, _label(mid), Offset(_left + w / 2 - 14, yLabel));
+    _text(
+      canvas,
+      _label(tMax),
+      Offset(size.width - _right, yLabel),
+      alignRight: true,
+    );
+
+    final line = Paint()
+      ..color = kSmokeColor
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2.4
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round;
+    final dot = Paint()..color = kSmokeColor;
+
+    final segments = <List<Offset>>[];
+    DateTime? prev;
+    for (final p in points) {
+      if (p.smoke == null) {
+        prev = null;
+        continue;
+      }
+      final o = Offset(xOf(p.t), yOf(p.smoke!.toDouble()));
+      if (prev == null || p.t.difference(prev).inSeconds > bucketSec * 3) {
+        segments.add([o]);
+      } else {
+        segments.last.add(o);
+      }
+      prev = p.t;
+    }
+
+    for (final seg in segments) {
+      if (seg.length == 1) {
+        canvas.drawCircle(seg.first, 2.5, dot);
+      } else {
+        final path = Path()..moveTo(seg.first.dx, seg.first.dy);
+        for (final o in seg.skip(1)) {
+          path.lineTo(o.dx, o.dy);
+        }
+        canvas.drawPath(path, line);
+      }
+    }
+
+    // Penanda bucket yang pernah mengalami alarm asap (BOOL_OR(smoke_alert)).
+    final alertFill = Paint()..color = kSmokeAlertColor;
+    final alertRing = Paint()
+      ..color = Colors.white
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.5;
+    for (final p in points) {
+      if (!p.smokeAlert) continue;
+      final yVal = p.smoke?.toDouble() ?? 0.0;
+      final center = Offset(xOf(p.t), yOf(yVal));
+      canvas.drawCircle(center, 4.5, alertFill);
+      canvas.drawCircle(center, 4.5, alertRing);
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _SmokeChartPainter old) => true;
 }
