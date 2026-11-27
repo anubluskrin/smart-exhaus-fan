@@ -9,6 +9,7 @@ import 'constants.dart';
 import 'stats_page.dart';
 import 'schedules_page.dart';
 import 'settings_page.dart';
+import 'splash_page.dart';
 
 class FanStatus {
   final bool online;
@@ -75,7 +76,7 @@ class BathfanApp extends StatelessWidget {
         scaffoldBackgroundColor: kBg,
         colorScheme: const ColorScheme.dark(primary: kAccent),
       ),
-      home: const HomeShell(),
+      home: const SplashPage(next: HomeShell()),
     );
   }
 }
